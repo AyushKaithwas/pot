@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.env
+config/devices.json
+tinytuya.json
+snapshot.json
+*.log
+.DS_Store

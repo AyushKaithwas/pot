@@ -1,0 +1,93 @@
+# Pot configuration. Secrets live in .env, device local keys in config/devices.json.
+
+[assistant]
+name = "Pot"
+# Extra persona instructions appended to the built-in prompt.
+extra_instructions = ""
+
+[voice]
+model = "gpt-realtime-2.1-mini"   # 3.2x cheaper than gpt-realtime-2.1 on audio both ways
+voice = "ash"
+transcribe_input = false          # billed per minute, only feeds the "you said" terminal line
+transcription_model = "gpt-4o-mini-transcribe"
+turn_detection = "semantic_vad"   # semantic_vad | server_vad
+reasoning_effort = "low"
+max_output_tokens = 800           # ~80 seconds of speech, a backstop against a monologue
+
+[audio]
+mode = "push_to_talk"   # push_to_talk | always_on
+auto_reopen = true      # reopen the mic once Pot stops talking, so one keypress starts a conversation
+sample_rate = 24000
+input_device = ""       # substring of the device name, empty = system default
+output_device = ""
+
+[skills]
+# Empty enabled = load everything discovered. disabled always wins.
+enabled = []
+disabled = []
+
+[research]
+model = "gpt-5.4-nano"              # quick lookups: weather, opening hours, scores
+deep_model = "gpt-5.6"              # only when the model asks for depth
+search_context_size = "low"
+deep_search_context_size = "medium"
+
+[costs]
+show_per_turn = true                # print what each turn cost as it happens
+
+# Dollars per million tokens. Update these when OpenAI's prices change; nothing else needs editing.
+[costs.models."gpt-realtime-2.1-mini"]
+audio_in = 10.0
+cached_audio_in = 0.30
+audio_out = 20.0
+text_in = 0.60
+cached_text_in = 0.06
+text_out = 2.40
+
+[costs.models."gpt-realtime-2.1"]
+audio_in = 32.0
+cached_audio_in = 0.40
+audio_out = 64.0
+text_in = 4.0
+cached_text_in = 0.40
+text_out = 24.0
+
+[costs.models."gpt-5.4-nano"]
+text_in = 0.20
+cached_text_in = 0.02
+text_out = 1.25
+
+[costs.models."gpt-5.4-mini"]
+text_in = 0.75
+cached_text_in = 0.075
+text_out = 4.50
+
+[costs.models."gpt-5.6"]
+text_in = 5.0
+cached_text_in = 0.50
+text_out = 30.0
+
+[lights]
+# Devices are addressed by Tuya gwId; the LAN IP is discovered at runtime because DHCP moves it.
+default_transition_pct = 60
+
+[lights.devices.beta1]
+gwid = "bf00000000000000beta1"
+name = "Beta 1"
+room = "bedroom"
+kind = "rgb batten"   # Wipro_Batten 5CH: tunable white plus colour
+aliases = ["beta", "beta one", "tube light", "tube", "batten", "rod light", "bedroom light"]
+
+# Second Tuya device on the LAN, not wired up yet.
+# [lights.devices.beta2]
+# gwid = "bf00000000000000beta2"
+# name = "Beta 2"
+# room = ""
+# kind = "batten"
+# aliases = []
+
+[lights.scenes.night]
+beta1 = { power = true, brightness_pct = 10, color_temp_pct = 0 }
+
+[lights.scenes.bright]
+beta1 = { power = true, brightness_pct = 100, color_temp_pct = 100 }
