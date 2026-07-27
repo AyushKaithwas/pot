@@ -1,4 +1,11 @@
-"""Speaker output with an instant flush, so barge-in actually feels like an interruption."""
+"""Speaker output: a small jitter buffer in, an instant flush out.
+
+Audio arrives from the network in bursts, so playing each burst the moment it lands leaves the
+device starved whenever the next one is late, and a gap mid-word is heard as a click or a rasp
+rather than as silence. A short pre-buffer absorbs that at the cost of starting a fraction of a
+second later. Flushing on interruption still empties everything immediately, because barge-in has
+to feel instant.
+"""
 
 from __future__ import annotations
 
@@ -14,10 +21,19 @@ from pot.audio.devices import default_samplerate, find_device
 log = logging.getLogger(__name__)
 
 BYTES_PER_SAMPLE = 2
+# How much audio to gather before starting to play. Long enough to ride out normal network jitter,
+# short enough that nobody notices the delay before Pot starts talking.
+PREBUFFER_MILLISECONDS = 120
 
 
 class Speaker:
-    def __init__(self, *, sample_rate: int, device_name: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        sample_rate: int,
+        device_name: str = "",
+        prebuffer_ms: int = PREBUFFER_MILLISECONDS,
+    ) -> None:
         self.source_rate = sample_rate
         # Audio that has been handed to us but not yet played, kept so echo suppression can be
         # told what left the speaker *when it left*. Writes run ahead of playback (the model sends
@@ -29,6 +45,11 @@ class Speaker:
         self._buffer = bytearray()
         self._lock = threading.Lock()
         self._stream: sd.RawOutputStream | None = None
+        # A buffer that runs dry mid-sentence is heard as a click or a rasp, so count it: the
+        # number is the difference between "the model sounds like that" and "we broke the audio".
+        self.underruns = 0
+        self._streaming = False
+        self._prebuffer_bytes = int(self._native_rate * prebuffer_ms / 1000) * BYTES_PER_SAMPLE
 
     @property
     def description(self) -> str:
@@ -97,6 +118,7 @@ class Speaker:
         """Drop everything still queued, e.g. when the user interrupts."""
         with self._lock:
             self._buffer.clear()
+            self._streaming = False
             # Audio that never played can't have echoed, so it isn't a reference for anything.
             self._reference.clear()
             self._played_frames = 0
@@ -106,9 +128,19 @@ class Speaker:
             log.debug("output stream status: %s", status)
         wanted = frames * BYTES_PER_SAMPLE
         with self._lock:
+            if not self._streaming:
+                # Wait for enough audio to ride out the next late packet before starting.
+                if len(self._buffer) < self._prebuffer_bytes:
+                    outdata[:wanted] = b"\x00" * wanted
+                    return
+                self._streaming = True
             available = min(wanted, len(self._buffer))
             chunk = bytes(self._buffer[:available])
             del self._buffer[:available]
+            if available < wanted:
+                # Ran dry mid-utterance: that's the click. Re-arm so the next burst pre-buffers.
+                self.underruns += 1
+                self._streaming = False
         outdata[:available] = chunk
         if available < wanted:
             outdata[available:wanted] = b"\x00" * (wanted - available)

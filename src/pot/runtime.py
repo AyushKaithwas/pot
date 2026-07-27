@@ -34,8 +34,12 @@ class Runtime:
     _usage: UsageMeter | None = field(default=None, repr=False)
     _speech_listeners: list[Callable[[bool], None]] = field(default_factory=list, repr=False)
     _listen_listeners: list[Callable[[bool], None]] = field(default_factory=list, repr=False)
+    _ring_listeners: list[Callable[[bool], None]] = field(default_factory=list, repr=False)
     _speaking: bool = False
     _listening: bool = False
+    _ringing: bool = False
+    # The session owns the speaker, so it parks the ringer here for the time skill to use.
+    ringer: Any | None = None
 
     @property
     def usage(self) -> UsageMeter:
@@ -66,8 +70,15 @@ class Runtime:
         """
         self._listen_listeners.append(callback)
 
+    def on_ring(self, callback: Callable[[bool], None]) -> None:
+        """Subscribe to "an alarm is ringing". Music ducks for this too."""
+        self._ring_listeners.append(callback)
+
     def set_speaking(self, speaking: bool) -> None:
         self._publish(self._speech_listeners, "_speaking", speaking)
+
+    def set_ringing(self, ringing: bool) -> None:
+        self._publish(self._ring_listeners, "_ringing", ringing)
 
     def set_listening(self, listening: bool) -> None:
         self._publish(self._listen_listeners, "_listening", listening)
@@ -79,6 +90,10 @@ class Runtime:
     @property
     def listening(self) -> bool:
         return self._listening
+
+    @property
+    def alarm_ringing(self) -> bool:
+        return self._ringing
 
     def _publish(self, listeners: list[Callable[[bool], None]], attribute: str, value: bool) -> None:
         if getattr(self, attribute) == value:

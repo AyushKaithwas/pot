@@ -95,11 +95,12 @@ def get_service() -> MusicService:
 
 def _create(rt: Runtime) -> MusicService:
     service = MusicService(rt.settings)
-    # Music ducks while Pot talks and while Pot is listening for a request; the session
-    # broadcasts both and skills subscribe, so core never imports a skill.
+    # Music ducks while Pot talks, while Pot listens for a request, and while an alarm rings; the
+    # session broadcasts all three and skills subscribe, so core never imports a skill.
     reasons: set[str] = set()
     rt.on_speech(lambda active: _set_quiet(service, reasons, "speaking", active))
     rt.on_listen(lambda active: _set_quiet(service, reasons, "listening", active))
+    rt.on_ring(lambda active: _set_quiet(service, reasons, "ringing", active))
     return service
 
 

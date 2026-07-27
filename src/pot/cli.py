@@ -23,11 +23,13 @@ music_app = typer.Typer(no_args_is_help=True, help="Sign in to Spotify and drive
 audio_app = typer.Typer(no_args_is_help=True, help="Check the microphone, speaker and wake word.")
 config_app = typer.Typer(no_args_is_help=True, help="Where settings live, and what Pot resolved.")
 service_app = typer.Typer(no_args_is_help=True, help="Run Pot at boot on a Linux device.")
+alarms_app = typer.Typer(no_args_is_help=True, help="Inspect timers and alarms outside a conversation.")
 app.add_typer(lights_app, name="lights")
 app.add_typer(music_app, name="music")
 app.add_typer(audio_app, name="audio")
 app.add_typer(config_app, name="config")
 app.add_typer(service_app, name="service")
+app.add_typer(alarms_app, name="alarms")
 
 
 def _setup(verbose: bool = False) -> Runtime:
@@ -417,6 +419,32 @@ def config_show() -> None:
     from pot.config import read_config
 
     console.print_json(data=read_config())
+
+
+@alarms_app.command("list")
+def alarms_list() -> None:
+    """What's pending, read from the same file the assistant uses."""
+    from pot.alarms import describe_all
+    from pot.skills.time.service import get_service
+
+    _setup()
+    service = get_service()
+    console.print(describe_all(service.pending()))
+    console.print(f"[dim]{service.store.path}[/dim]")
+
+
+@alarms_app.command("cancel")
+def alarms_cancel(which: str = typer.Argument(..., help='An id from `alarms list`, or "all"')) -> None:
+    """Cancel a timer or alarm without talking to Pot."""
+    from pot.skills.time.service import get_service
+
+    _setup()
+    service = get_service()
+    if which.strip().lower() == "all":
+        console.print(f"cancelled {len(service.cancel_all())}")
+        return
+    alarm = service.cancel(which.strip())
+    console.print(f"cancelled {alarm.describe()}" if alarm else f"nothing with id {which}")
 
 
 def _check_audio(settings: Settings) -> None:

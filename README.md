@@ -8,7 +8,7 @@ Runs on macOS for development and on a Raspberry Pi as a standalone device: loca
 screen, no keyboard, starts at boot. Audio only reaches OpenAI after the wake word fires, so an
 idle room costs nothing.
 
-MIT licensed. Skills are one file each, and the ones that exist (lights, music, timers, research)
+MIT licensed. Skills are one file each, and the ones that exist (lights, music, alarms, research)
 are as much examples as features.
 
 ## Setup
@@ -33,7 +33,7 @@ nobody's house.
 |---|---|
 | `~/.config/pot/pot.toml` | your settings, merged over the shipped defaults |
 | `~/.config/pot/env` | secrets |
-| `~/.local/state/pot/` | device keys, Spotify token, wake word cache |
+| `~/.local/state/pot/` | device keys, Spotify token, alarms, wake word cache |
 | `config/pot.toml` | shipped defaults, and the reference for every option |
 
 `pot config path` prints all of it, `pot config show` prints the merged result.
@@ -253,6 +253,34 @@ Two details that took measuring:
 A custom "hey pot" needs a training run rather than a config change, so a stock trigger comes
 first. Tune `threshold` in your actual room with `pot audio wake`; lower catches more and misfires
 more.
+
+## Timers and alarms
+
+```
+"set a timer for ten minutes"
+"wake me at seven"                      -> rings at 07:00, once
+"alarm at 6:30 every weekday"           -> repeats, skips the weekend
+"remind me to take the bins out at six"
+"what timers do I have?"  ·  "cancel the pasta timer"
+"snooze"  ·  "stop"                     -> while it's ringing
+```
+
+Three things make these trustworthy rather than decorative:
+
+- **They survive a restart.** Everything is stored in `~/.local/state/pot/alarms.json` and reloaded
+  on start, because a device gets rebooted and an alarm you can't rely on is worse than none.
+  Anything that came due while Pot was off fires immediately: waking up late beats not waking up.
+- **They ring rather than announce.** A single spoken sentence is missable. Pot chimes, gets
+  gradually louder, ducks any music, and keeps going until you say stop or snooze, giving up after
+  three minutes so a forgotten alarm doesn't ring at an empty house.
+- **Recurring alarms keep their wall-clock time.** "7am on weekdays" is recomputed from 7am rather
+  than by adding 24 hours, so it doesn't drift an hour when the clocks change, and snoozing a
+  recurring alarm doesn't move tomorrow's.
+
+```bash
+uv run pot alarms list          # what's pending, without starting a conversation
+uv run pot alarms cancel 2
+```
 
 ## Echo: the mic hearing the speaker
 

@@ -6,7 +6,7 @@ from pot.skills import discover, load
 
 def test_every_skill_module_is_discovered():
     found = discover()
-    assert {"lights", "timers", "research", "basics"} <= set(found)
+    assert {"lights", "music", "time", "research", "basics"} <= set(found)
 
 
 def test_skills_expose_tools_and_prompts():

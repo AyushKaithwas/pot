@@ -21,6 +21,7 @@ from pot.audio.cues import Cues
 from pot.audio.echo import EchoSuppressor
 from pot.audio.playback import Speaker
 from pot.audio.ptt import keypresses, raw_terminal
+from pot.audio.ring import Ringer
 from pot.audio.wake import WakeWord, WakeWordUnavailable
 from pot.audio.wake import build as build_wake
 from pot.config import AudioConfig, Settings
@@ -84,6 +85,9 @@ async def run_voice(settings: Settings) -> None:
     # The detector has to keep listening while Pot talks, or you could never interrupt it, so it
     # gets a copy of the mic with Pot's own voice subtracted out.
     echo = EchoSuppressor(audio_config.sample_rate, enabled=audio_config.echo_suppression)
+    # Alarms need to make noise without the model being involved, so the ringer goes on the
+    # runtime for the time skill to pick up when it starts.
+    runtime.ringer = Ringer(speaker, sample_rate=audio_config.sample_rate)
 
     console.print(
         f"[bold]{settings.assistant.name}[/bold] ready. Skills: {', '.join(skill.name for skill in skills)}"
@@ -117,6 +121,11 @@ async def run_voice(settings: Settings) -> None:
             with contextlib.suppress(asyncio.CancelledError):
                 task.result()
     runtime.on_announce(None)
+    if speaker.underruns:
+        console.print(
+            f"[yellow]{speaker.underruns} playback underrun(s)[/yellow] — that's audible as "
+            "clicks or rasp. Try a larger [audio] sample_rate, or check CPU load."
+        )
     console.print(runtime.usage.summary())
     await runtime.close()
 
