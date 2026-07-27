@@ -254,6 +254,43 @@ A custom "hey pot" needs a training run rather than a config change, so a stock 
 first. Tune `threshold` in your actual room with `pot audio wake`; lower catches more and misfires
 more.
 
+## Echo: the mic hearing the speaker
+
+A speaker and a microphone in one box create two separate problems, and only one of them is
+solvable in software here.
+
+**Pot hearing itself.** While Pot speaks, the mic gate already stops that audio reaching OpenAI,
+but the wake word detector has to keep listening or you could never interrupt. Since Pot knows
+exactly what it sent to the speaker, it subtracts that from the detector's copy of the microphone.
+Measured on a MacBook at full volume, that removes about **8 dB** (roughly 84% of the echo energy).
+It's suppression, not true cancellation, so it leaves artefacts, which is why it's applied only to
+the detector and never to what Pot sends to the model. Turn it off with `echo_suppression = false`.
+
+```bash
+uv run pot audio echo     # how much the mic hears the speaker, and what suppression removes
+```
+
+Run that at your normal volume. If it reports the speaker is barely louder than the room, echo
+isn't your problem.
+
+**Music.** This one can't be fixed the same way. The audio comes from the Spotify app or from
+librespot, a different process, so Pot has no reference signal to subtract. Three real options,
+best first:
+
+1. **Don't share the speaker.** Set `preferred_device` under `[music]` to an Echo, a phone or
+   another speaker. Zero echo, no processing, and Pot's own speaker stays free for its voice.
+2. **Use an OS echo canceller** on the Pi, which taps the speaker's monitor and so cancels
+   *whatever* is playing, including music from other processes:
+   ```bash
+   sudo apt install pipewire wireplumber
+   # then load module-echo-cancel and point input_device at the echo-cancelled source
+   ```
+   This is webrtc's AEC3 and is far better than what Pot does in-process. `pot audio devices` will
+   show the new source once it exists.
+3. **Route music through Pot** so it becomes part of the reference: run librespot with its pipe
+   backend and let Pot mix and play it. Designed but not built; it would make music cancellable
+   without depending on PipeWire, at the cost of pushing all audio through Python.
+
 ## As an audio-only device
 
 The Pi build has no screen and no keyboard, so nothing can rely on the terminal. Everything the

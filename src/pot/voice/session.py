@@ -18,6 +18,7 @@ from agents.realtime import RealtimeRunner, RealtimeSession
 
 from pot.audio.capture import BLOCK_MILLISECONDS, Microphone, MicrophoneGate
 from pot.audio.cues import Cues
+from pot.audio.echo import EchoSuppressor
 from pot.audio.playback import Speaker
 from pot.audio.ptt import keypresses, raw_terminal
 from pot.audio.wake import WakeWord, WakeWordUnavailable
@@ -80,6 +81,9 @@ async def run_voice(settings: Settings) -> None:
     )
     wake = _build_wake_word(settings)
     window = ConversationWindow(audio_config.wake.conversation_idle_seconds)
+    # The detector has to keep listening while Pot talks, or you could never interrupt it, so it
+    # gets a copy of the mic with Pot's own voice subtracted out.
+    echo = EchoSuppressor(audio_config.sample_rate, enabled=audio_config.echo_suppression)
 
     console.print(
         f"[bold]{settings.assistant.name}[/bold] ready. Skills: {', '.join(skill.name for skill in skills)}"
@@ -95,7 +99,8 @@ async def run_voice(settings: Settings) -> None:
         await _start_skill_services(runtime, skills)
         tasks = [
             asyncio.create_task(
-                _pump_microphone(session, microphone, gate, wake, runtime, cues, window), name="mic"
+                _pump_microphone(session, microphone, gate, wake, runtime, cues, window, echo, speaker),
+                name="mic",
             ),
             asyncio.create_task(
                 _pump_events(session, speaker, gate, runtime, cues, wake, window), name="events"
@@ -171,6 +176,8 @@ async def _pump_microphone(
     runtime: Runtime,
     cues: Cues,
     window: ConversationWindow | None = None,
+    echo: EchoSuppressor | None = None,
+    speaker: Speaker | None = None,
 ) -> None:
     """Route every chunk: always to the wake word, to OpenAI only once it has fired.
 
@@ -187,13 +194,20 @@ async def _pump_microphone(
         deque(maxlen=_preroll_chunks(runtime.settings.audio)) if wake is not None else None
     )
     async for chunk in microphone.chunks():
+        if echo is not None and speaker is not None:
+            # What actually left the speaker since the last chunk, which is what the mic is
+            # hearing now. Pulled rather than pushed, because writes run ahead of playback.
+            echo.playback(speaker.drain_reference())
         if gate.is_open:
             await session.send_audio(chunk)
             continue
         if recent is None:
             continue
         recent.append(chunk)
-        if wake is not None and wake.feed(chunk):
+        # Only the detector gets the echo-suppressed copy: it has artefacts, and what reaches the
+        # model is gated while Pot speaks anyway, so it never needs them.
+        heard = echo.process(chunk) if echo is not None else chunk
+        if wake is not None and heard and wake.feed(heard):
             _start_listening(gate, runtime, cues, wake)
             if window is not None:
                 window.start()

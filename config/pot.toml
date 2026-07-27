@@ -31,6 +31,10 @@ mode = "push_to_talk"
 auto_reopen = true      # reopen the mic once Pot stops talking, so one keypress starts a conversation
 cues = true             # earcons for listening/working/errors: the only status a screenless device has
 cue_volume = 0.2
+# Subtract Pot's own playback from what the wake word detector hears, so it can still hear you
+# while Pot is talking. About 8 dB on a laptop; measure yours with `pot audio echo`. This cannot
+# touch music from another app, which has no reference signal: see the README.
+echo_suppression = true
 sample_rate = 24000
 input_device = ""       # substring of the device name, empty = system default. See `pot audio devices`
 output_device = ""

@@ -19,6 +19,11 @@ BYTES_PER_SAMPLE = 2
 class Speaker:
     def __init__(self, *, sample_rate: int, device_name: str = "") -> None:
         self.source_rate = sample_rate
+        # Audio that has been handed to us but not yet played, kept so echo suppression can be
+        # told what left the speaker *when it left*. Writes run ahead of playback (the model sends
+        # faster than real time), so tapping at write time would misalign the reference badly.
+        self._reference = bytearray()
+        self._played_frames = 0
         self._device = find_device(device_name, kind="output")
         self._native_rate = self._pick_rate()
         self._buffer = bytearray()
@@ -63,7 +68,25 @@ class Speaker:
             self._stream.close()
             self._stream = None
 
+    def drain_reference(self) -> bytes:
+        """Audio that has actually reached the speaker since the last call, at the session rate.
+
+        Aligned to playback rather than to writes, which is what makes echo suppression able to
+        line the reference up with what the microphone is hearing right now.
+        """
+        with self._lock:
+            frames, self._played_frames = self._played_frames, 0
+            if frames <= 0 or not self._reference:
+                return b""
+            wanted = int(frames * self.source_rate / self._native_rate) * BYTES_PER_SAMPLE
+            wanted = min(wanted, len(self._reference))
+            played = bytes(self._reference[:wanted])
+            del self._reference[:wanted]
+            return played
+
     def write(self, pcm16: bytes) -> None:
+        with self._lock:
+            self._reference.extend(pcm16)
         if self._native_rate != self.source_rate:
             samples = np.frombuffer(pcm16, dtype=np.int16)
             pcm16 = soxr.resample(samples, self.source_rate, self._native_rate).tobytes()
@@ -74,6 +97,9 @@ class Speaker:
         """Drop everything still queued, e.g. when the user interrupts."""
         with self._lock:
             self._buffer.clear()
+            # Audio that never played can't have echoed, so it isn't a reference for anything.
+            self._reference.clear()
+            self._played_frames = 0
 
     def _on_request(self, outdata, frames: int, time_info, status) -> None:  # PortAudio thread
         if status:
@@ -86,3 +112,5 @@ class Speaker:
         outdata[:available] = chunk
         if available < wanted:
             outdata[available:wanted] = b"\x00" * (wanted - available)
+        # Count only real audio: the zero padding is silence and echoes nothing.
+        self._played_frames += available // BYTES_PER_SAMPLE

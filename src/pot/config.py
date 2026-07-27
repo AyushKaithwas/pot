@@ -122,6 +122,10 @@ class AudioConfig(BaseModel):
     # screen, so they stay on by default.
     cues: bool = True
     cue_volume: float = 0.2
+    # Subtract Pot's own playback from what the wake word detector hears, using the audio we sent
+    # to the speaker as the reference. Only affects the detector's copy, never what Pot sends to
+    # the model. Cannot touch music from another app: that has no reference (see the README).
+    echo_suppression: bool = True
     sample_rate: int = 24000
     input_device: str = ""
     output_device: str = ""

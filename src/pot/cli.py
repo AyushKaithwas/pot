@@ -434,6 +434,15 @@ def _check_audio(settings: Settings) -> None:
             console.print(f"  {kind}:  {defaults().get(kind, 'unavailable')}")
 
     console.print(f"  mode: {audio.mode}")
+    if audio.uses_wake_word:
+        state = "on" if audio.echo_suppression else "off"
+        console.print(f"  echo suppression: {state} (measure it with `pot audio echo`)")
+        if settings.music.speaker.enabled:
+            console.print(
+                "  [yellow]music plays on Pot's own speaker while the wake word listens.[/yellow]\n"
+                "  [dim]Pot can't subtract music (no reference signal): point [music] "
+                "preferred_device at another speaker, or use an OS echo canceller.[/dim]"
+            )
     if not audio.uses_wake_word:
         return
     from pot.audio.wake import WakeWordUnavailable, build, triggers_for
@@ -518,6 +527,86 @@ def audio_cues() -> None:
                 play_cue()
                 cues.reset_working()
                 await asyncio.sleep(1.0)
+
+    asyncio.run(run())
+
+
+@audio_app.command("echo")
+def audio_echo(seconds: float = typer.Option(4.0, "--seconds", "-s", min=2, max=20)) -> None:
+    """Measure how much of Pot's own speaker the microphone hears, and what suppression removes.
+
+    Run this with the volume where you normally keep it. If the mic barely hears the speaker, echo
+    isn't your problem and music is (see the README: music has no reference to subtract).
+    """
+    import numpy as np
+
+    from pot.audio.capture import Microphone
+    from pot.audio.echo import EchoSuppressor
+    from pot.audio.playback import Speaker
+
+    settings = _setup().settings
+    audio = settings.audio
+    rate = audio.sample_rate
+
+    def level(pcm: bytes) -> float:
+        if not pcm:
+            return 0.0
+        return float(np.abs(np.frombuffer(pcm, dtype=np.int16)).mean())
+
+    def noise(length: float) -> bytes:
+        """Speech-shaped-ish noise: broadband, so it excites the whole band the mic cares about."""
+        rng = np.random.default_rng(11)
+        samples = rng.normal(0, 6000, int(rate * length))
+        return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+
+    async def measure(playing: bool) -> tuple[float, float, float]:
+        echo = EchoSuppressor(rate, enabled=True)
+        speaker = Speaker(sample_rate=rate, device_name=audio.output_device)
+        microphone = Microphone(sample_rate=rate, device_name=audio.input_device)
+        raw, clean = [], []
+        async with speaker, microphone:
+            if playing:
+                speaker.write(noise(seconds))
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + seconds
+            async for chunk in microphone.chunks():
+                echo.playback(speaker.drain_reference())
+                raw.append(level(chunk))
+                cleaned = echo.process(chunk)
+                if cleaned:
+                    clean.append(level(cleaned))
+                if loop.time() >= deadline:
+                    break
+        return (
+            float(np.mean(raw or [0])),
+            float(np.mean(clean or [0])),
+            echo.delay_ms,
+        )
+
+    async def run() -> None:
+        console.print(f"measuring the room for {seconds:g}s, stay quiet")
+        quiet, _, _ = await measure(playing=False)
+        console.print(f"  room noise: {quiet:.0f}")
+        console.print(f"playing {seconds:g}s of test noise through the speaker")
+        loud, suppressed, delay = await measure(playing=True)
+        console.print(f"  mic heard: {loud:.0f}  (after suppression: {suppressed:.0f})")
+
+        echo_above_room = loud / max(quiet, 1.0)
+        console.print(f"\nspeaker is {echo_above_room:.1f}x louder in the mic than the room alone")
+        if echo_above_room < 2.0:
+            console.print(
+                "[green]Pot barely hears itself[/green] on this hardware, so its own voice isn't "
+                "your problem. Music from another app is a separate matter: there's no reference "
+                "to subtract, so keep it off this speaker or use an OS echo canceller."
+            )
+            return
+        gain_db = 20 * np.log10(max(loud, 1.0) / max(suppressed, 1.0))
+        console.print(f"suppression removes {gain_db:.1f} dB, round trip estimated at {delay:.0f}ms")
+        if gain_db < 3:
+            console.print(
+                "[yellow]that's not much.[/yellow] Move the mic away from the speaker, turn the "
+                "volume down, or use an OS echo canceller (README)."
+            )
 
     asyncio.run(run())
 
