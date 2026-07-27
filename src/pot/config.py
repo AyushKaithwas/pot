@@ -7,6 +7,7 @@ onto the device entries by gwId, so pot.toml stays safe to commit.
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 from functools import lru_cache
 from pathlib import Path
@@ -21,6 +22,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "config"
 CONFIG_FILE = CONFIG_DIR / "pot.toml"
 DEVICES_FILE = CONFIG_DIR / "devices.json"
+# Tokens and caches, kept out of the repo. Pass 2 moves config here too.
+STATE_DIR = Path(os.environ.get("POT_STATE_DIR") or Path.home() / ".local/state/pot")
 
 
 class AssistantConfig(BaseModel):
@@ -31,6 +34,9 @@ class AssistantConfig(BaseModel):
 class VoiceConfig(BaseModel):
     model: str = "gpt-realtime-2.1-mini"
     voice: str = "ash"
+    # Slightly quicker than natural: a home assistant's answers are short, and waiting through
+    # an unhurried reading of "the light is on" gets old.
+    speed: float = Field(default=1.15, ge=0.25, le=1.5)
     # Transcribing your own speech is billed per minute and only feeds the terminal transcript,
     # so it's off by default. Pot's own side is transcribed for free either way.
     transcribe_input: bool = False
@@ -39,6 +45,10 @@ class VoiceConfig(BaseModel):
     reasoning_effort: Literal["minimal", "low", "medium", "high"] = "low"
     # Audio output is the most expensive thing here, so cap a runaway monologue.
     max_output_tokens: int = 800
+    # True keeps Pot answerable while a slow tool runs, at the price of reporting each result
+    # separately (more words, ~30% more cost on multi-tool turns). False gives one tighter reply
+    # but leaves Pot deaf until the tool lands, which on a 30s search is a long time.
+    async_tool_calls: bool = True
 
 
 class AudioConfig(BaseModel):
@@ -46,6 +56,10 @@ class AudioConfig(BaseModel):
     # Reopen the mic by itself once Pot stops talking, so a conversation needs one keypress
     # rather than one per turn. Turn off if the speakers make Pot interrupt itself.
     auto_reopen: bool = True
+    # Earcons for listening, working and errors. The only status channel on a device with no
+    # screen, so they stay on by default.
+    cues: bool = True
+    cue_volume: float = 0.2
     sample_rate: int = 24000
     input_device: str = ""
     output_device: str = ""
@@ -63,6 +77,38 @@ class ResearchConfig(BaseModel):
     deep_model: str = "gpt-5.6"
     search_context_size: Literal["low", "medium", "high"] = "low"
     deep_search_context_size: Literal["low", "medium", "high"] = "medium"
+
+
+class SpotifyConfig(BaseModel):
+    # Each user registers their own Spotify app: development-mode apps are capped at five
+    # authenticated users, so a single shared Pot app could never serve everyone.
+    client_id: str = ""
+    redirect_port: int = 8765
+
+    def token_path(self) -> Path:
+        return STATE_DIR / "spotify-token.json"
+
+
+class SpeakerConfig(BaseModel):
+    """Pot as a Spotify Connect device, via librespot. Off unless asked for."""
+
+    enabled: bool = False
+    name: str = "Pot"
+    binary: str = "librespot"
+    backend: str = "rodio"  # rodio works on macOS; use alsa on the Pi
+    bitrate: int = 160
+    device: str = ""  # backend-specific output device, empty means default
+
+    def cache_path(self) -> Path:
+        return STATE_DIR / "librespot"
+
+
+class MusicConfig(BaseModel):
+    provider: str = "spotify"
+    preferred_device: str = ""
+    duck_to_percent: int = 20
+    spotify: SpotifyConfig = Field(default_factory=SpotifyConfig)
+    speaker: SpeakerConfig = Field(default_factory=SpeakerConfig)
 
 
 class CostConfig(BaseModel):
@@ -119,6 +165,7 @@ class Settings(BaseSettings):
     audio: AudioConfig = Field(default_factory=AudioConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
+    music: MusicConfig = Field(default_factory=MusicConfig)
     costs: CostConfig = Field(default_factory=CostConfig)
     lights: LightsConfig = Field(default_factory=LightsConfig)
 

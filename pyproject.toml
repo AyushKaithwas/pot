@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "openai-agents>=0.18.3",
     "openai>=2.48.0",
+    "httpx>=0.28",
     "tinytuya>=1.20.0",
     "sounddevice>=0.5.5",
     "soxr>=1.1.0",

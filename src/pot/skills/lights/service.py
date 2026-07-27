@@ -53,10 +53,20 @@ class LightService:
         if wanted in EVERYTHING:
             return list(self.devices.values())
 
-        exact = [d for d in self.devices.values() if wanted in d.match_terms()]
+        # Compare without spaces too: speech-to-text hands over "tubelight" for "tube light".
+        squashed = wanted.replace(" ", "")
+        exact = [
+            d
+            for d in self.devices.values()
+            if wanted in d.match_terms() or squashed in {t.replace(" ", "") for t in d.match_terms()}
+        ]
         if exact:
             return exact
-        partial = [d for d in self.devices.values() if any(wanted in term for term in d.match_terms())]
+        partial = [
+            d
+            for d in self.devices.values()
+            if any(squashed in term.replace(" ", "") for term in d.match_terms())
+        ]
         if partial:
             return partial
         known = ", ".join(d.spoken_name for d in self.devices.values()) or "none configured"

@@ -62,19 +62,114 @@ Two gotchas that cost time on the first device, in case a future one behaves odd
 - **Stale reads.** tinytuya's persistent connection caches the last status, and it doesn't always
   reflect a mode change, so every change re-queries the device before reporting back.
 
+## Music
+
+Pot copies how an Echo does this. An Echo *is* a Spotify Connect speaker: it runs a Spotify
+client, audio streams to it from Spotify's servers, and the voice assistant only sends control
+commands. So Pot has two halves too: it always controls playback through the Spotify Web API, and
+it can optionally *be* a speaker by running librespot.
+
+Spotify **Premium** is required for either half.
+
+### Setup, roughly five minutes
+
+Everyone runs their own Spotify app: development-mode apps are capped at five authenticated
+users, and extended quota is reserved for businesses with 250k+ monthly actives, so there's no
+shared "sign in to Pot" to offer.
+
+1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → Create app.
+2. Redirect URI: `http://127.0.0.1:8765/callback`. Tick the Web API.
+3. Copy the Client ID into `client_id` under `[music.spotify]` in `config/pot.toml`. There's no
+   client secret to copy: Pot uses PKCE.
+4. `uv run pot music login`, approve in the browser.
+
+```bash
+uv run pot music devices              # what's available to play on
+uv run pot music play "brown eyed girl"
+uv run pot music play "moondance" --kind album
+uv run pot music pause / resume / skip / volume 40 / status
+```
+
+### Pot as a speaker
+
+Without this, music plays on whatever Spotify device is awake: your phone, your laptop, an Echo.
+That's the whole story on a Mac, where the desktop app is already a Connect device.
+
+On a Pi there's nothing else to play through, so Pot runs its own client:
+
+```bash
+sudo apt install librespot     # brew install librespot on macOS
+```
+
+Then set `enabled = true` under `[music.speaker]` (and `backend = "alsa"` on the Pi). Pot starts
+librespot with the session, restarts it if it dies, and prefers it over other devices. "Pot"
+appears in your Spotify app's device list like any other speaker.
+
+librespot is an unofficial Spotify client. Fine for your own home, not something to ship in a
+product, which is why it's optional and off by default.
+
+### Ducking
+
+Music and Pot share a speaker, so the music drops to `duck_to_percent` while Pot talks and goes
+back to exactly where it was afterwards. It waits for playback to actually drain rather than for
+the last audio packet, or it would come back up mid-sentence. Setting the volume by hand while
+Pot is talking wins: your choice isn't undone.
+
 ## Talking to it
 
 ```bash
 uv run pot talk
 ```
 
+Pot speaks at 1.15x and answers in a sentence or less by default; `speed` under `[voice]` and the
+persona in [src/pot/voice/persona.py](src/pot/voice/persona.py) are the two dials.
+
 Press space once and then just talk. The mic shuts while Pot is answering, so the speakers can't
 talk into the microphone, and reopens by itself once playback has drained. Space toggles it off
 again mid-conversation, `q` quits.
 
+A tool that takes a while (a web search runs about ten seconds) doesn't block Pot from talking,
+so it will answer, hand back the mic, and keep working. A spinner stays up for as long as anything
+is in flight, saying what it's doing and that you can still interrupt, and each tool reports how
+long it took when it lands.
+
 Under `[audio]` in `config/pot.toml`: `auto_reopen = false` goes back to one keypress per turn
 (use it if the room echoes enough that Pot interrupts itself), and `mode = "always_on"` is fully
 hands-free, which is what the Pi will want with a proper mic.
+
+## As an audio-only device
+
+The Pi build has no screen and no keyboard, so nothing can rely on the terminal. Everything the
+terminal says has a sound:
+
+| Sound | Means |
+|---|---|
+| rising two-tone blip | Pot is listening |
+| falling blip | mic closed |
+| soft double tick, every 5s | a tool is still running (a web search takes 10-30s) |
+| low buzz | something failed |
+
+Cues never play over Pot's own speech, because playback is a queue rather than a mixer: a cue
+during a reply would land after it. Tune with `cues` and `cue_volume` under `[audio]`, and pass
+`--quiet` to silence them.
+
+```bash
+uv run pot talk --hands-free      # always-on mic, no keypress to start
+```
+
+Two things still assume a laptop, and both have a workaround until the setup pass lands:
+
+- **Spotify login needs a browser.** On a headless box, forward the callback port and run the
+  login there, then open the printed URL on your laptop:
+  ```bash
+  ssh -L 8765:127.0.0.1:8765 pi@pot
+  uv run pot music login --no-browser
+  ```
+- **Config is a file.** Editing `config/pot.toml` over SSH works, but a real product needs the
+  setup wizard.
+
+Still to build for a screenless device: a wake word (so there's no keypress at all), a physical
+button as a fallback, and running under systemd so there's no `q` to quit.
 
 ## What it costs
 
@@ -103,6 +198,11 @@ Other things that matter for the bill:
 - **Push-to-talk means you don't pay for silence.** Always-on mode streams continuously.
 - **Input transcription** (`transcribe_input = true`) is billed per minute and only feeds the
   "you said" line in the terminal. Pot's own side is transcribed either way.
+- **`async_tool_calls = false`** makes multi-tool turns about 30% cheaper and noticeably
+  shorter, because each result no longer gets its own reply. The cost is that Pot can't hear you
+  until the tool finishes, which on a 30-second search is a long silence. Measured on one
+  weather-plus-light turn: 3 replies / 50 words / $0.0108 with it on, 2 replies / 30 words /
+  $0.0073 with it off.
 
 ## Adding a skill
 
@@ -145,6 +245,7 @@ with the session. See `src/pot/skills/lights/service.py`.
 | `src/pot/audio/` | mic capture, playback with flush-on-interrupt, push-to-talk keys |
 | `src/pot/skills/` | one module per capability, each exporting `SKILL` |
 | `src/pot/skills/lights/` | discovery, provider chain (LAN → cloud), alias resolution |
+| `src/pot/skills/music/` | Spotify auth, Web API client, speaker choice, ducking |
 | `src/pot/scheduler.py` | deferred actions: timers, "in ten minutes" |
 | `config/pot.toml` | models, voice, audio devices, lights, scenes |
 

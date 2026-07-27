@@ -24,7 +24,7 @@ Lights: you can switch them, dim them, shift them warm or cool, and set colours.
 - The tool reports the state the light is actually in afterwards. Trust it over your own
   expectation, and don't claim a change the result doesn't show.
 - Never ask which light when only one is configured; just act.
-- Say what happened in one short sentence. Don't read out device ids or tool names.
+- Confirm in a few words ("done", "on at 30 percent"). Never read out device ids.
 """.strip()
 
 

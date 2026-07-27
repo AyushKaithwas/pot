@@ -7,10 +7,10 @@ import json
 import logging
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from pot.config import DEVICES_FILE, Settings, load_settings
+from pot.console import console
 from pot.runtime import Runtime, set_runtime
 from pot.skills.lights import discovery
 from pot.skills.lights.provider import LightChange
@@ -18,8 +18,9 @@ from pot.skills.lights.service import get_service
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Pot, a voice assistant.")
 lights_app = typer.Typer(no_args_is_help=True, help="Control and inspect the lights directly.")
+music_app = typer.Typer(no_args_is_help=True, help="Sign in to Spotify and drive playback.")
 app.add_typer(lights_app, name="lights")
-console = Console()
+app.add_typer(music_app, name="music")
 
 
 def _setup(verbose: bool = False) -> Runtime:
@@ -33,11 +34,25 @@ def _setup(verbose: bool = False) -> Runtime:
 
 
 @app.command()
-def talk(verbose: bool = typer.Option(False, "--verbose", "-v")) -> None:
+def talk(
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+    hands_free: bool = typer.Option(
+        False, "--hands-free", help="Always-on mic, for a device with no keyboard"
+    ),
+    quiet: bool = typer.Option(False, "--quiet", help="No earcons"),
+) -> None:
     """Start a voice conversation."""
     from pot.voice import run_voice
 
     settings = _setup(verbose).settings
+    if hands_free or quiet:
+        audio = settings.audio.model_copy(
+            update={
+                "mode": "always_on" if hands_free else settings.audio.mode,
+                "cues": not quiet and settings.audio.cues,
+            }
+        )
+        settings = settings.model_copy(update={"audio": audio})
     try:
         asyncio.run(run_voice(settings))
     except KeyboardInterrupt:
@@ -115,6 +130,8 @@ def doctor() -> None:
         console.print(f"  output: {describe(None, kind='output')}")
     except Exception as exc:
         console.print(f"[red]audio devices unavailable:[/red] {exc}")
+
+    _check_music(settings)
 
     devices = settings.lights.devices
     if not devices:
@@ -262,6 +279,183 @@ def lights_keys() -> None:
         console.print(
             f"  {device.get('name')} · {device.get('id')} · key {'yes' if device.get('key') else 'no'}"
         )
+
+
+def _check_music(settings: Settings) -> None:
+    from pot.skills.music.spotify.auth import SpotifyAuth, TokenStore
+    from pot.skills.music.spotify.speaker import ManagedSpeaker, install_hint
+
+    spotify = settings.music.spotify
+    _check("Spotify client id", bool(spotify.client_id))
+    auth = SpotifyAuth(spotify.client_id, spotify.redirect_port, TokenStore(spotify.token_path()))
+    _check("signed in to Spotify (`pot music login`)", auth.logged_in)
+
+    speaker = ManagedSpeaker(settings)
+    if not speaker.enabled:
+        console.print("  [dim]Pot's own speaker is off; music plays on your other devices[/dim]")
+        return
+    _check(
+        f"{settings.music.speaker.binary} installed for Pot's speaker ({install_hint()})",
+        speaker.binary_path() is not None,
+    )
+
+
+@music_app.command("login")
+def music_login(
+    no_browser: bool = typer.Option(
+        False, "--no-browser", help="Print the URL instead of opening it, for a headless device"
+    ),
+) -> None:
+    """Authorise Pot against your own Spotify app."""
+    from pot.skills.music.service import get_service
+    from pot.skills.music.spotify.auth import SpotifyAuthError
+
+    runtime = _setup()
+    provider = _spotify(runtime)
+    if provider is None:
+        raise typer.Exit(1)
+
+    async def run() -> None:
+        try:
+            await provider.auth.login(open_browser=not no_browser)
+        except SpotifyAuthError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        console.print("[green]signed in[/green]")
+        for speaker in await get_service().speakers():
+            console.print(f"  {speaker.describe()}")
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+@music_app.command("logout")
+def music_logout() -> None:
+    """Forget the stored Spotify token."""
+    runtime = _setup()
+    provider = _spotify(runtime)
+    if provider is None:
+        raise typer.Exit(1)
+    provider.auth.logout()
+    console.print("signed out")
+
+
+@music_app.command("devices")
+def music_devices() -> None:
+    """List the speakers music can play on."""
+    from pot.skills.music.service import get_service
+
+    runtime = _setup()
+
+    async def run() -> None:
+        service = get_service()
+        speakers = await service.speakers()
+        if not speakers:
+            console.print("[yellow]no Spotify devices are awake right now[/yellow]")
+        table = Table("speaker", "type", "volume", "notes")
+        for speaker in speakers:
+            notes = ", ".join(
+                mark for mark, on in (("Pot", speaker.is_pot), ("active", speaker.is_active)) if on
+            )
+            volume = f"{speaker.volume_percent}%" if speaker.volume_percent is not None else "-"
+            table.add_row(speaker.name, speaker.kind, volume, notes)
+        console.print(table)
+        await runtime.close()
+
+    _run_music(runtime, run)
+
+
+@music_app.command("play")
+def music_play(
+    query: str = typer.Argument("", help="What to play; empty resumes"),
+    kind: str = typer.Option("track", "--kind", "-k", help="track, album, artist or playlist"),
+    speaker: str = typer.Option("", "--speaker", "-s", help="Speaker name, empty for the usual one"),
+) -> None:
+    """Play something: `pot music play "brown eyed girl"`."""
+    from pot.skills.music.service import get_service
+
+    runtime = _setup()
+
+    async def run() -> None:
+        console.print(await get_service().play(query or None, kind, speaker))
+        await runtime.close()
+
+    _run_music(runtime, run)
+
+
+@music_app.command("pause")
+def music_pause() -> None:
+    """Pause playback."""
+    _simple_music("pause")
+
+
+@music_app.command("resume")
+def music_resume() -> None:
+    """Resume playback."""
+    _simple_music("resume")
+
+
+@music_app.command("skip")
+def music_skip(
+    backwards: bool = typer.Option(False, "--back", "-b", help="Previous track instead of next"),
+) -> None:
+    """Skip to the next track, or back."""
+    _simple_music("skip", backwards)
+
+
+@music_app.command("volume")
+def music_volume(percent: int = typer.Argument(..., min=0, max=100)) -> None:
+    """Set the music volume."""
+    _simple_music("set_volume", percent)
+
+
+@music_app.command("status")
+def music_status() -> None:
+    """What's playing."""
+    _simple_music("now_playing")
+
+
+def _simple_music(method: str, *args: object) -> None:
+    from pot.skills.music.service import get_service
+
+    runtime = _setup()
+
+    async def run() -> None:
+        console.print(await getattr(get_service(), method)(*args))
+        await runtime.close()
+
+    _run_music(runtime, run)
+
+
+def _run_music(runtime: Runtime, run) -> None:
+    from pot.skills.music.provider import MusicError
+    from pot.skills.music.spotify.auth import SpotifyAuthError
+
+    try:
+        asyncio.run(run())
+    except (MusicError, SpotifyAuthError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+def _spotify(runtime: Runtime):
+    """The Spotify provider, or None with an explanation printed."""
+    from pot.skills.music.service import get_service
+    from pot.skills.music.spotify.provider import SpotifyProvider
+
+    provider = get_service().provider
+    if not isinstance(provider, SpotifyProvider):
+        console.print(f"[red]the music provider is {provider.name}, not spotify[/red]")
+        return None
+    if not runtime.settings.music.spotify.client_id:
+        console.print(
+            "[red]no Spotify client id configured.[/red]\n"
+            "  1. Create an app at https://developer.spotify.com/dashboard\n"
+            f"  2. Add the redirect URI {provider.auth.redirect_uri}\n"
+            r"  3. Put the client id under \[music.spotify] in config/pot.toml"
+        )
+        return None
+    return provider
 
 
 def _priced_models(settings: Settings) -> list[str]:

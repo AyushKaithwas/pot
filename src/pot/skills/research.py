@@ -7,10 +7,12 @@ summarise. Sources are printed to the terminal rather than read aloud.
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 from agents import function_tool
 from openai import AsyncOpenAI
 
+from pot.console import console
 from pot.runtime import Runtime, runtime
 from pot.skills.base import Skill
 
@@ -19,8 +21,8 @@ log = logging.getLogger(__name__)
 PROMPT = """
 Research: use `research` for anything you don't reliably know, anything time-sensitive
 (weather, news, prices, schedules, "is X open"), or anything needing a source. Ask a full
-question, not keywords. Summarise the answer in one or two spoken sentences and offer detail
-only if asked. Never claim you searched when you didn't.
+question, not keywords. Give the answer in one sentence; offer detail only if asked. Never
+claim you searched when you didn't.
 Leave depth at "quick" for everyday questions; it handles them fine and costs a fraction of
 "deep". Only pass depth="deep" when the question genuinely needs digging across sources.
 """.strip()
@@ -74,9 +76,19 @@ async def research(question: str, depth: str = "quick") -> str:
     answer = (response.output_text or "").strip()
     sources = _sources(response)
     if sources:
+        # Full URLs wrap over several lines and bury the conversation; --verbose has them.
         log.info("research sources for %r: %s", question, ", ".join(sources))
-        print("[sources] " + "\n           ".join(sources))
+        console.print(f"[dim]sources: {', '.join(_domains(sources))}[/dim]", highlight=False)
     return answer or "The search came back empty."
+
+
+def _domains(urls: list[str]) -> list[str]:
+    seen: list[str] = []
+    for url in urls:
+        host = urlparse(url).netloc.removeprefix("www.")
+        if host and host not in seen:
+            seen.append(host)
+    return seen
 
 
 def _record_usage(rt: Runtime, model: str, response: object) -> None:

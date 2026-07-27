@@ -8,15 +8,21 @@ extra_instructions = ""
 [voice]
 model = "gpt-realtime-2.1-mini"   # 3.2x cheaper than gpt-realtime-2.1 on audio both ways
 voice = "ash"
+speed = 1.15                      # 0.25-1.5; a home assistant's short answers suit a quicker read
 transcribe_input = false          # billed per minute, only feeds the "you said" terminal line
 transcription_model = "gpt-4o-mini-transcribe"
 turn_detection = "semantic_vad"   # semantic_vad | server_vad
 reasoning_effort = "low"
 max_output_tokens = 800           # ~80 seconds of speech, a backstop against a monologue
+# true: Pot stays answerable while a slow tool runs, but reports each result separately.
+# false: one tighter, cheaper reply per turn, but Pot can't hear you until the tool finishes.
+async_tool_calls = true
 
 [audio]
-mode = "push_to_talk"   # push_to_talk | always_on
+mode = "push_to_talk"   # push_to_talk | always_on. A screenless device wants always_on.
 auto_reopen = true      # reopen the mic once Pot stops talking, so one keypress starts a conversation
+cues = true             # earcons for listening/working/errors: the only status a screenless device has
+cue_volume = 0.2
 sample_rate = 24000
 input_device = ""       # substring of the device name, empty = system default
 output_device = ""
@@ -31,6 +37,28 @@ model = "gpt-5.4-nano"              # quick lookups: weather, opening hours, sco
 deep_model = "gpt-5.6"              # only when the model asks for depth
 search_context_size = "low"
 deep_search_context_size = "medium"
+
+[music]
+provider = "spotify"
+preferred_device = ""     # a speaker name to favour, e.g. "MacBook Pro"; empty = whatever's awake
+duck_to_percent = 20      # music dips to this while Pot is talking, then goes back
+
+[music.spotify]
+# Your own Spotify app from developer.spotify.com/dashboard. Spotify caps a development-mode app
+# at five users, so everyone runs their own rather than sharing one.
+# Add http://127.0.0.1:8765/callback to the app's redirect URIs, then run `pot music login`.
+client_id = "your-spotify-client-id"
+redirect_port = 8765
+
+[music.speaker]
+# Makes Pot itself a Spotify Connect speaker, the way an Echo is one. Needs librespot installed
+# and a Premium account. Off by default: it's an unofficial Spotify client.
+enabled = false
+name = "Pot"
+binary = "librespot"
+backend = "rodio"         # rodio on macOS, alsa on a Raspberry Pi
+bitrate = 160
+device = ""               # backend-specific output device, empty = system default
 
 [costs]
 show_per_turn = true                # print what each turn cost as it happens

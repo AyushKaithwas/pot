@@ -41,13 +41,16 @@ def build_run_config(settings: Settings) -> RealtimeRunConfig:
         "output_modalities": ["audio"],
         "audio": {
             "input": audio_input,
-            "output": {"format": "pcm16", "voice": settings.voice.voice},
+            "output": {
+                "format": "pcm16",
+                "voice": settings.voice.voice,
+                "speed": settings.voice.speed,
+            },
         },
         "reasoning": {"effort": settings.voice.reasoning_effort},
         "max_output_tokens": settings.voice.max_output_tokens,
     }
     return {
         "model_settings": model_settings,
-        # Long tools (research) must not stop Pot from talking while they run.
-        "async_tool_calls": True,
+        "async_tool_calls": settings.voice.async_tool_calls,
     }

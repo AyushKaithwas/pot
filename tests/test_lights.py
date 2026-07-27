@@ -49,6 +49,13 @@ def test_resolve_by_name_alias_and_room(settings: Settings):
     assert {d.id for d in service.resolve("all")} == {"beta1", "beta2"}
 
 
+def test_resolve_survives_speech_glued_words(settings: Settings):
+    """The realtime model hands over "tubelight" when the user said "tube light"."""
+    service = service_with(settings, FakeProvider("fake"))
+    assert [d.id for d in service.resolve("tubelight")] == ["beta1"]
+    assert [d.id for d in service.resolve("bedroomlight")] == ["beta1"]
+
+
 def test_resolve_unknown_light_lists_known_ones(settings: Settings):
     service = service_with(settings, FakeProvider("fake"))
     with pytest.raises(UnknownLight, match="Beta 1"):
