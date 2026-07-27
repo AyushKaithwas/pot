@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 
 import typer
 from rich.table import Table
 
-from pot.config import DEVICES_FILE, Settings, load_settings
+from pot.config import Settings, devices_file, load_settings
 from pot.console import console
 from pot.runtime import Runtime, set_runtime
 from pot.skills.lights import discovery
@@ -19,8 +20,14 @@ from pot.skills.lights.service import get_service
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Pot, a voice assistant.")
 lights_app = typer.Typer(no_args_is_help=True, help="Control and inspect the lights directly.")
 music_app = typer.Typer(no_args_is_help=True, help="Sign in to Spotify and drive playback.")
+audio_app = typer.Typer(no_args_is_help=True, help="Check the microphone, speaker and wake word.")
+config_app = typer.Typer(no_args_is_help=True, help="Where settings live, and what Pot resolved.")
+service_app = typer.Typer(no_args_is_help=True, help="Run Pot at boot on a Linux device.")
 app.add_typer(lights_app, name="lights")
 app.add_typer(music_app, name="music")
+app.add_typer(audio_app, name="audio")
+app.add_typer(config_app, name="config")
+app.add_typer(service_app, name="service")
 
 
 def _setup(verbose: bool = False) -> Runtime:
@@ -123,19 +130,14 @@ def doctor() -> None:
         not unpriced,
     )
 
-    try:
-        from pot.audio.devices import describe
-
-        console.print(f"  input:  {describe(None, kind='input')}")
-        console.print(f"  output: {describe(None, kind='output')}")
-    except Exception as exc:
-        console.print(f"[red]audio devices unavailable:[/red] {exc}")
-
+    _check_audio(settings)
     _check_music(settings)
 
     devices = settings.lights.devices
     if not devices:
-        console.print("[yellow]no lights configured in config/pot.toml[/yellow]")
+        from pot.config import config_file
+
+        console.print(f"[yellow]no lights configured in {config_file()}[/yellow]")
         return
     for device in devices.values():
         _check(f"local key for {device.spoken_name}", bool(device.local_key))
@@ -273,12 +275,288 @@ def lights_keys() -> None:
     if isinstance(devices, dict) and devices.get("Error"):
         console.print(f"[red]{devices['Error']}[/red]")
         raise typer.Exit(1)
-    DEVICES_FILE.write_text(json.dumps(devices, indent=2) + "\n")
-    console.print(f"wrote {len(devices)} device(s) to {DEVICES_FILE}")
+    target = devices_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(devices, indent=2) + "\n")
+    target.chmod(0o600)  # local keys are as good as a password on the LAN
+    console.print(f"wrote {len(devices)} device(s) to {target}")
     for device in devices:
         console.print(
             f"  {device.get('name')} · {device.get('id')} · key {'yes' if device.get('key') else 'no'}"
         )
+
+
+@service_app.command("install")
+def service_install(
+    print_only: bool = typer.Option(False, "--print", help="Show the unit instead of writing it"),
+) -> None:
+    """Write a systemd user unit so Pot starts at boot and restarts if it dies."""
+    from pot import service
+
+    unit = service.render_unit()
+    if print_only:
+        console.print(unit, highlight=False)
+        return
+    if not service.is_supported():
+        console.print("[yellow]systemd is Linux-only, so this only helps on the Pi.[/yellow]")
+        console.print("Here's the unit it would write:\n")
+        console.print(unit, highlight=False)
+        raise typer.Exit(1)
+
+    path = service.write_unit(unit)
+    console.print(f"wrote {path}\n\nnow run:")
+    for command in service.enable_commands():
+        console.print(f"  {command}")
+    console.print(
+        "\n[dim]the last one lets the service run with nobody logged in, "
+        "and is the only step needing sudo[/dim]"
+    )
+
+
+@service_app.command("status")
+def service_status() -> None:
+    """Is Pot running?"""
+    from pot import service
+
+    if not service.is_supported():
+        console.print("[yellow]no systemd here[/yellow]")
+        raise typer.Exit(1)
+    result = service.run_systemctl("status", service.UNIT_NAME, "--no-pager")
+    console.print(result.stdout or result.stderr, highlight=False)
+
+
+@service_app.command("logs")
+def service_logs(
+    lines: int = typer.Option(50, "--lines", "-n"),
+    follow: bool = typer.Option(False, "--follow", "-f"),
+) -> None:
+    """Pot's log, which on a headless box is the only way to see what it's doing."""
+    import subprocess
+
+    from pot import service
+
+    if not service.is_supported():
+        console.print("[yellow]no journald here[/yellow]")
+        raise typer.Exit(1)
+    subprocess.run(service.journal(lines, follow), check=False)
+
+
+STARTER_CONFIG = """\
+# Your Pot settings. Merged over the defaults shipped with Pot, so anything you leave out keeps
+# the shipped value and an update never overwrites your choices. See the shipped config for every
+# available option, or run `pot config defaults`.
+
+[audio]
+# wake_word needs `uv sync --extra wakeword`. It also means audio only reaches OpenAI after the
+# word fires, so an idle room costs nothing.
+# mode = "wake_word"
+
+[music.spotify]
+# From developer.spotify.com/dashboard, with http://127.0.0.1:8765/callback as a redirect URI.
+client_id = ""
+
+# Declare your lights here. `pot lights scan` prints the gwid of everything on the network.
+# [lights.devices.tube]
+# gwid = ""
+# name = "Tube light"
+# room = "bedroom"
+# aliases = ["tube", "batten"]
+"""
+
+
+@config_app.command("path")
+def config_path() -> None:
+    """Where Pot reads settings, secrets and state from."""
+    from pot.config import DEFAULTS_FILE, config_file, devices_file, env_file, state_dir
+
+    for label, path in (
+        ("your config", config_file()),
+        ("shipped defaults", DEFAULTS_FILE),
+        ("secrets", env_file()),
+        ("state", state_dir()),
+        ("device keys", devices_file()),
+    ):
+        mark = "" if path.exists() else " [dim](absent)[/dim]"
+        console.print(f"  {label}: {path}{mark}")
+
+
+@config_app.command("init")
+def config_init(
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing file"),
+) -> None:
+    """Write a starter config to ~/.config/pot/pot.toml."""
+    from pot.config import config_file
+
+    target = config_file()
+    if target.exists() and not force:
+        console.print(f"{target} already exists; --force to replace it")
+        raise typer.Exit(1)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(STARTER_CONFIG)
+    console.print(f"wrote {target}")
+
+
+@config_app.command("edit")
+def config_edit() -> None:
+    """Open your config in $EDITOR."""
+    import os
+    import subprocess
+
+    from pot.config import config_file
+
+    target = config_file()
+    if not target.exists():
+        config_init()
+    editor = os.environ.get("EDITOR", "nano" if sys.platform.startswith("linux") else "open -e")
+    subprocess.run([*editor.split(), str(target)], check=False)
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Print the merged configuration Pot is actually using."""
+    from pot.config import read_config
+
+    console.print_json(data=read_config())
+
+
+def _check_audio(settings: Settings) -> None:
+    from pot.audio.devices import AudioDeviceError, describe, find_device
+    from pot.audio.diagnose import defaults
+
+    audio = settings.audio
+    for kind, wanted in (("input", audio.input_device), ("output", audio.output_device)):
+        try:
+            index = find_device(wanted, kind=kind)
+            console.print(f"  {kind}:  {describe(index, kind=kind)}")
+        except AudioDeviceError as exc:
+            _check(f"{kind} device {wanted!r}: {exc}", False)
+        except Exception:
+            console.print(f"  {kind}:  {defaults().get(kind, 'unavailable')}")
+
+    console.print(f"  mode: {audio.mode}")
+    if not audio.uses_wake_word:
+        return
+    from pot.audio.wake import available, is_downloaded, stock_models
+
+    if not available():
+        _check("wake word extra installed (uv sync --extra wakeword)", False)
+        return
+    if audio.wake.model not in stock_models() and not audio.wake.model.endswith(".onnx"):
+        _check(f"wake word {audio.wake.model!r} exists (have: {', '.join(stock_models())})", False)
+        return
+    _check(
+        f"wake word {audio.wake.model!r} downloaded (first run fetches ~5 MB)",
+        is_downloaded(audio.wake.model),
+    )
+
+
+@audio_app.command("devices")
+def audio_devices() -> None:
+    """List audio devices. Put a piece of the name into input_device or output_device."""
+    from pot.audio.diagnose import defaults, device_rows
+
+    settings = _setup().settings
+    table = Table("#", "device", "in", "out", "default rate")
+    for row in device_rows():
+        table.add_row(
+            str(row["index"]),
+            row["name"],
+            str(row["inputs"]) if row["inputs"] else "",
+            str(row["outputs"]) if row["outputs"] else "",
+            f"{row['rate']} Hz",
+        )
+    console.print(table)
+    for kind, description in defaults().items():
+        console.print(f"  system {kind}: {description}")
+    for kind, configured in (
+        ("input", settings.audio.input_device),
+        ("output", settings.audio.output_device),
+    ):
+        console.print(f"  configured {kind}: {configured or '[dim]system default[/dim]'}")
+
+
+@audio_app.command("test")
+def audio_test(seconds: float = typer.Option(3.0, "--seconds", "-s", min=0.5, max=30)) -> None:
+    """Record, play it back, and report the level. The first thing to run on new hardware."""
+    from pot.audio.diagnose import describe_level, peak_level, play, record
+
+    settings = _setup().settings
+
+    async def run() -> None:
+        console.print(f"recording {seconds:g}s, say something")
+        pcm = await record(settings.audio, seconds)
+        console.print(describe_level(peak_level(pcm)))
+        console.print("playing it back")
+        await play(settings.audio, pcm)
+        console.print("done")
+
+    try:
+        asyncio.run(run())
+    except Exception as exc:
+        console.print(f"[red]audio failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
+@audio_app.command("cues")
+def audio_cues() -> None:
+    """Play the earcons, to set cue_volume by ear."""
+    from pot.audio.cues import Cues
+    from pot.audio.playback import Speaker
+
+    settings = _setup().settings
+
+    async def run() -> None:
+        speaker = Speaker(sample_rate=settings.audio.sample_rate, device_name=settings.audio.output_device)
+        async with speaker:
+            cues = Cues(speaker, sample_rate=settings.audio.sample_rate, volume=settings.audio.cue_volume)
+            for name, play_cue in (
+                ("listening", cues.ready),
+                ("mic closed", cues.closed),
+                ("still working", cues.working),
+                ("failed", cues.error),
+            ):
+                console.print(f"  {name}")
+                play_cue()
+                cues.reset_working()
+                await asyncio.sleep(1.0)
+
+    asyncio.run(run())
+
+
+@audio_app.command("wake")
+def audio_wake(seconds: float = typer.Option(30.0, "--seconds", "-s", help="How long to listen")) -> None:
+    """Listen and report wake word scores, for tuning the threshold in the actual room."""
+    from pot.audio.capture import Microphone
+    from pot.audio.wake import WakeWord, WakeWordUnavailable
+
+    settings = _setup().settings
+    audio = settings.audio
+
+    async def run() -> None:
+        try:
+            wake = WakeWord(audio.wake.model, threshold=audio.wake.threshold, sample_rate=audio.sample_rate)
+        except WakeWordUnavailable as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+
+        spoken = audio.wake.model.replace("_", " ")
+        console.print(f'say "{spoken}" · threshold {audio.wake.threshold} · listening {seconds:g}s')
+        microphone = Microphone(sample_rate=audio.sample_rate, device_name=audio.input_device)
+        best, hits = 0.0, 0
+        async with microphone:
+            deadline = asyncio.get_running_loop().time() + seconds
+            async for chunk in microphone.chunks():
+                if wake.feed(chunk):
+                    hits += 1
+                    console.print(f"[green]fired[/green] at {wake.last_score:.3f}")
+                best = max(best, wake.last_score)
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+        console.print(f"peak score {best:.3f}, {hits} detection(s)")
+        if hits == 0 and best > 0.2:
+            console.print("[yellow]close but under the threshold; try lowering it[/yellow]")
+
+    asyncio.run(run())
 
 
 def _check_music(settings: Settings) -> None:

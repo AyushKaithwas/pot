@@ -1,4 +1,10 @@
-# Pot configuration. Secrets live in .env, device local keys in config/devices.json.
+# Pot's shipped defaults. Don't edit this to configure your own install: put your settings in
+# ~/.config/pot/pot.toml instead, where they're merged over these and survive updates.
+#
+#   pot config init    write a starter file there
+#   pot config path    show where it lives
+#
+# Secrets go in ~/.config/pot/env (OPENAI_API_KEY, TUYA_API_KEY, TUYA_API_SECRET, TUYA_API_REGION).
 
 [assistant]
 name = "Pot"
@@ -19,13 +25,22 @@ max_output_tokens = 800           # ~80 seconds of speech, a backstop against a 
 async_tool_calls = true
 
 [audio]
-mode = "push_to_talk"   # push_to_talk | always_on. A screenless device wants always_on.
+# push_to_talk needs a keyboard. A standalone device wants wake_word, which also means audio only
+# reaches OpenAI once the word fires, so an empty room costs nothing.
+mode = "push_to_talk"
 auto_reopen = true      # reopen the mic once Pot stops talking, so one keypress starts a conversation
 cues = true             # earcons for listening/working/errors: the only status a screenless device has
 cue_volume = 0.2
 sample_rate = 24000
-input_device = ""       # substring of the device name, empty = system default
+input_device = ""       # substring of the device name, empty = system default. See `pot audio devices`
 output_device = ""
+
+[audio.wake]
+# Needs the extra: uv sync --extra wakeword. Stock triggers are alexa, hey_jarvis, hey_mycroft
+# and hey_rhasspy; a custom "hey pot" is a training run, not a config change.
+model = "hey_jarvis"
+threshold = 0.5                 # lower catches more and misfires more; tune with `pot audio wake`
+conversation_idle_seconds = 15  # quiet for this long and Pot goes back to waiting for the word
 
 [skills]
 # Empty enabled = load everything discovered. disabled always wins.
@@ -40,14 +55,14 @@ deep_search_context_size = "medium"
 
 [music]
 provider = "spotify"
-preferred_device = ""     # a speaker name to favour, e.g. "MacBook Pro"; empty = whatever's awake
-duck_to_percent = 20      # music dips to this while Pot is talking, then goes back
+preferred_device = ""     # a speaker name to favour, e.g. "Echo Dot"; empty = whatever's awake
+duck_to_percent = 20      # music dips to this while Pot talks or listens, then goes back
 
 [music.spotify]
 # Your own Spotify app from developer.spotify.com/dashboard. Spotify caps a development-mode app
 # at five users, so everyone runs their own rather than sharing one.
 # Add http://127.0.0.1:8765/callback to the app's redirect URIs, then run `pot music login`.
-client_id = "your-spotify-client-id"
+client_id = ""
 redirect_port = 8765
 
 [music.speaker]
@@ -59,6 +74,17 @@ binary = "librespot"
 backend = "rodio"         # rodio on macOS, alsa on a Raspberry Pi
 bitrate = 160
 device = ""               # backend-specific output device, empty = system default
+
+# Lights are yours to declare, in ~/.config/pot/pot.toml. Find the gwid with `pot lights scan`:
+#
+#   [lights.devices.tube]
+#   gwid = "..."
+#   name = "Tube light"
+#   room = "bedroom"
+#   aliases = ["tube", "batten"]
+#
+#   [lights.scenes.night]
+#   tube = { power = true, brightness_pct = 10, color_temp_pct = 0 }
 
 [costs]
 show_per_turn = true                # print what each turn cost as it happens
@@ -94,28 +120,3 @@ text_out = 4.50
 text_in = 5.0
 cached_text_in = 0.50
 text_out = 30.0
-
-[lights]
-# Devices are addressed by Tuya gwId; the LAN IP is discovered at runtime because DHCP moves it.
-default_transition_pct = 60
-
-[lights.devices.beta1]
-gwid = "bf00000000000000beta1"
-name = "Beta 1"
-room = "bedroom"
-kind = "rgb batten"   # Wipro_Batten 5CH: tunable white plus colour
-aliases = ["beta", "beta one", "tube light", "tube", "batten", "rod light", "bedroom light"]
-
-# Second Tuya device on the LAN, not wired up yet.
-# [lights.devices.beta2]
-# gwid = "bf00000000000000beta2"
-# name = "Beta 2"
-# room = ""
-# kind = "batten"
-# aliases = []
-
-[lights.scenes.night]
-beta1 = { power = true, brightness_pct = 10, color_temp_pct = 0 }
-
-[lights.scenes.bright]
-beta1 = { power = true, brightness_pct = 100, color_temp_pct = 100 }

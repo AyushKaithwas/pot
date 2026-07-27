@@ -10,20 +10,24 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import sys
+from collections import deque
 from collections.abc import Iterable
 
 from agents.realtime import RealtimeRunner, RealtimeSession
 
-from pot.audio.capture import Microphone, MicrophoneGate
+from pot.audio.capture import BLOCK_MILLISECONDS, Microphone, MicrophoneGate
 from pot.audio.cues import Cues
 from pot.audio.playback import Speaker
 from pot.audio.ptt import keypresses, raw_terminal
-from pot.config import Settings
+from pot.audio.wake import WakeWord, WakeWordUnavailable
+from pot.config import AudioConfig, Settings
 from pot.console import console
 from pot.runtime import Runtime, set_runtime
 from pot.skills import load
 from pot.voice.activity import ToolActivity
 from pot.voice.agent import build_agent, build_run_config
+from pot.voice.conversation import ConversationWindow
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +54,8 @@ class Announcer:
 
 async def run_voice(settings: Settings) -> None:
     if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set; copy .env.example to .env and fill it in")
+        raise RuntimeError("OPENAI_API_KEY is not set; put it in ~/.config/pot/env")
+    _check_input_is_reachable(settings.audio)
 
     runtime = Runtime(settings)
     set_runtime(runtime)
@@ -58,31 +63,28 @@ async def run_voice(settings: Settings) -> None:
     agent = build_agent(settings, skills)
     runner = RealtimeRunner(starting_agent=agent, config=build_run_config(settings))
 
-    always_on = settings.audio.mode == "always_on"
-    gate = MicrophoneGate(open_at_start=always_on)
+    audio_config = settings.audio
+    gate = MicrophoneGate(open_at_start=audio_config.mic_open_at_start)
     microphone = Microphone(
-        sample_rate=settings.audio.sample_rate,
-        device_name=settings.audio.input_device,
+        sample_rate=audio_config.sample_rate,
+        device_name=audio_config.input_device,
         gate=gate,
     )
-    speaker = Speaker(sample_rate=settings.audio.sample_rate, device_name=settings.audio.output_device)
+    speaker = Speaker(sample_rate=audio_config.sample_rate, device_name=audio_config.output_device)
     cues = Cues(
         speaker,
-        sample_rate=settings.audio.sample_rate,
-        volume=settings.audio.cue_volume,
-        enabled=settings.audio.cues,
+        sample_rate=audio_config.sample_rate,
+        volume=audio_config.cue_volume,
+        enabled=audio_config.cues,
     )
+    wake = _build_wake_word(audio_config)
+    window = ConversationWindow(audio_config.wake.conversation_idle_seconds)
 
     console.print(
         f"[bold]{settings.assistant.name}[/bold] ready. Skills: {', '.join(skill.name for skill in skills)}"
     )
     console.print(f"mic {microphone.description} · speaker {speaker.description}")
-    if always_on:
-        console.print("[dim]always-on mic · q = quit[/dim]")
-    elif settings.audio.auto_reopen:
-        console.print("[dim]space = start talking, then just keep talking · q = quit[/dim]")
-    else:
-        console.print("[dim]space = talk, once per turn · q = quit[/dim]")
+    console.print(f"[dim]{_how_to_talk(audio_config, wake)}[/dim]")
 
     # The key lives in .env, which pydantic-settings reads without exporting to the environment,
     # so hand it to the model rather than letting it look itself up.
@@ -91,8 +93,12 @@ async def run_voice(settings: Settings) -> None:
         runtime.on_announce(Announcer(session))
         await _start_skill_services(runtime, skills)
         tasks = [
-            asyncio.create_task(_pump_microphone(session, microphone), name="mic"),
-            asyncio.create_task(_pump_events(session, speaker, gate, runtime, cues), name="events"),
+            asyncio.create_task(
+                _pump_microphone(session, microphone, gate, wake, runtime, cues, window), name="mic"
+            ),
+            asyncio.create_task(
+                _pump_events(session, speaker, gate, runtime, cues, wake, window), name="events"
+            ),
         ]
         with raw_terminal() as interactive:
             if interactive:
@@ -121,9 +127,99 @@ async def _start_skill_services(runtime: Runtime, skills: Iterable[object]) -> N
             log.exception("skill %s failed to start", getattr(skill, "name", skill))
 
 
-async def _pump_microphone(session: RealtimeSession, microphone: Microphone) -> None:
+def _check_input_is_reachable(audio: AudioConfig) -> None:
+    """Refuse to start mute.
+
+    Under systemd there's no terminal, so push-to-talk would wait forever for a keypress that
+    can't arrive. Failing with the fix in the journal beats a service that looks healthy and
+    never answers.
+    """
+    if audio.mode != "push_to_talk" or sys.stdin.isatty():
+        return
+    raise RuntimeError(
+        'push_to_talk needs a terminal, and there isn\'t one here. Set mode = "wake_word" '
+        '(or "always_on") under [audio], or run with --hands-free.'
+    )
+
+
+def _build_wake_word(audio: AudioConfig) -> WakeWord | None:
+    if not audio.uses_wake_word:
+        return None
+    try:
+        return WakeWord(audio.wake.model, threshold=audio.wake.threshold, sample_rate=audio.sample_rate)
+    except WakeWordUnavailable as exc:
+        # Falling back silently would leave a screenless device deaf with no explanation.
+        raise RuntimeError(f"wake word mode needs a working wake word: {exc}") from exc
+
+
+def _how_to_talk(audio: AudioConfig, wake: WakeWord | None) -> str:
+    if wake is not None:
+        return f'say "{wake.model_name.replace("_", " ")}" to start · q = quit'
+    if audio.mode == "always_on":
+        return "always-on mic · q = quit"
+    if audio.auto_reopen:
+        return "space = start talking, then just keep talking · q = quit"
+    return "space = talk, once per turn · q = quit"
+
+
+async def _pump_microphone(
+    session: RealtimeSession,
+    microphone: Microphone,
+    gate: MicrophoneGate,
+    wake: WakeWord | None,
+    runtime: Runtime,
+    cues: Cues,
+    window: ConversationWindow | None = None,
+) -> None:
+    """Route every chunk: always to the wake word, to OpenAI only once it has fired.
+
+    This is the whole cost story. While the gate is shut nothing leaves the machine, so a room
+    with nobody in it bills nothing.
+
+    The pre-roll matters more than it looks. Detection only completes a few hundred milliseconds
+    after the wake word ends, and by then you're already saying what you want, so sending audio
+    from the moment of detection loses the first syllables of the request.
+    """
+    # Always at least one chunk deep: the chunk that triggered the wake word is part of the
+    # request too, so dropping it would clip the very first word.
+    recent: deque[bytes] | None = (
+        deque(maxlen=_preroll_chunks(runtime.settings.audio)) if wake is not None else None
+    )
     async for chunk in microphone.chunks():
-        await session.send_audio(chunk)
+        if gate.is_open:
+            await session.send_audio(chunk)
+            continue
+        if recent is None:
+            continue
+        recent.append(chunk)
+        if wake is not None and wake.feed(chunk):
+            _start_listening(gate, runtime, cues, wake)
+            if window is not None:
+                window.start()
+            for buffered in recent:
+                await session.send_audio(buffered)
+            recent.clear()
+
+
+def _preroll_chunks(audio: AudioConfig) -> int:
+    """How many mic chunks of history to replay when the wake word fires."""
+    return max(1, round(audio.wake.preroll_seconds * 1000 / BLOCK_MILLISECONDS))
+
+
+def _start_listening(gate: MicrophoneGate, runtime: Runtime, cues: Cues, wake: WakeWord | None) -> None:
+    if wake is not None:
+        wake.reset()
+    gate.open()
+    runtime.set_listening(True)
+    cues.ready()
+    console.print("[green]listening[/green]")
+
+
+def _stop_listening(gate: MicrophoneGate, runtime: Runtime, cues: Cues, reason: str) -> None:
+    gate.close()
+    runtime.set_listening(False)
+    cues.closed()
+    console.print(f"[dim]{reason}[/dim]")
 
 
 async def _pump_events(
@@ -132,16 +228,25 @@ async def _pump_events(
     gate: MicrophoneGate,
     runtime: Runtime,
     cues: Cues,
+    wake: WakeWord | None = None,
+    window: ConversationWindow | None = None,
 ) -> None:
     transcripts = TranscriptPrinter()
     activity = ToolActivity()
     ticker = asyncio.create_task(_tick_while_working(activity, cues), name="working-cue")
+    watcher = (
+        asyncio.create_task(_close_when_idle(gate, runtime, cues, wake, window), name="idle")
+        if window is not None and wake is not None
+        else None
+    )
     audio = runtime.settings.audio
     hands_free = audio.mode == "always_on"
     reopen: asyncio.Task | None = None
 
     try:
         async for event in session:
+            if window is not None:
+                window.touch()
             if event.type == "audio":
                 if not hands_free:
                     # Pot is talking: stop listening so we don't hear ourselves.
@@ -158,7 +263,9 @@ async def _pump_events(
                         runtime,
                         activity,
                         cues,
-                        reopen_mic=not hands_free and audio.auto_reopen,
+                        # With a wake word the gate is already open for the conversation, and the
+                        # model's idle timeout closes it; nothing to reopen here.
+                        reopen_mic=not hands_free and wake is None and audio.auto_reopen,
                     ),
                     name="finish-speaking",
                 )
@@ -176,6 +283,12 @@ async def _pump_events(
                 transcripts.feed(event.history)
             elif event.type == "raw_model_event" and event.data.type == "usage":
                 _record_usage(event.data, runtime)
+            elif (
+                event.type == "raw_model_event"
+                and event.data.type == "input_audio_timeout_triggered"
+                and wake is not None
+            ):
+                _stop_listening(gate, runtime, cues, f'back to "{wake.model_name}"')
             elif event.type == "error":
                 # Nothing to read on a screenless device, so the buzz is the whole message.
                 console.print(f"[red]error[/red] {event.error}")
@@ -183,8 +296,10 @@ async def _pump_events(
             elif event.type == "guardrail_tripped":
                 console.print("[yellow]guardrail tripped[/yellow]")
     finally:
-        ticker.cancel()
-        await asyncio.gather(ticker, return_exceptions=True)
+        for task in (ticker, watcher):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(*(t for t in (ticker, watcher) if t is not None), return_exceptions=True)
         activity.stop()
 
 
@@ -192,6 +307,23 @@ def _record_usage(event: object, runtime: Runtime) -> None:
     turn_cost = runtime.usage.record_realtime(runtime.settings.voice.model, event)
     if runtime.settings.costs.show_per_turn:
         console.print(f"[dim]${turn_cost:.4f} this turn · ${runtime.usage.cost():.4f} total[/dim]")
+
+
+async def _close_when_idle(
+    gate: MicrophoneGate,
+    runtime: Runtime,
+    cues: Cues,
+    wake: WakeWord | None,
+    window: ConversationWindow,
+) -> None:
+    """Stop streaming once the exchange has gone quiet, and wait for the wake word again."""
+    while True:
+        await asyncio.sleep(0.5)
+        if not window.expired():
+            continue
+        window.stop()
+        spoken = wake.model_name.replace("_", " ") if wake is not None else "the wake word"
+        _stop_listening(gate, runtime, cues, f'quiet · say "{spoken}" again')
 
 
 async def _tick_while_working(activity: ToolActivity, cues: Cues) -> None:

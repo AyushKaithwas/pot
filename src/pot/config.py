@@ -1,7 +1,11 @@
-"""Configuration: secrets from .env, everything else from config/pot.toml.
+"""Configuration, layered so an installed copy owns none of its own settings.
 
-Device local keys live in config/devices.json (written by `pot lights keys`) and are merged
-onto the device entries by gwId, so pot.toml stays safe to commit.
+Your settings live in ~/.config/pot/pot.toml and are merged over the defaults shipped with the
+source, so an update never overwrites them and the repo carries nobody's device ids. Secrets come
+from ~/.config/pot/env (or a .env beside the source, for development). Device keys and tokens go
+to ~/.local/state/pot, which is machine-specific and never in a backup of the config.
+
+POT_CONFIG, POT_ENV and POT_STATE_DIR override the locations, which is what the tests use.
 """
 
 from __future__ import annotations
@@ -11,7 +15,7 @@ import os
 import tomllib
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,11 +23,37 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pot.usage import Rates
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_DIR = REPO_ROOT / "config"
-CONFIG_FILE = CONFIG_DIR / "pot.toml"
-DEVICES_FILE = CONFIG_DIR / "devices.json"
-# Tokens and caches, kept out of the repo. Pass 2 moves config here too.
-STATE_DIR = Path(os.environ.get("POT_STATE_DIR") or Path.home() / ".local/state/pot")
+# Shipped defaults. Editing this file is fine for development; an install shouldn't have to.
+DEFAULTS_FILE = REPO_ROOT / "config" / "pot.toml"
+
+
+def _xdg(variable: str, fallback: str) -> Path:
+    return Path(os.environ.get(variable) or Path.home() / fallback)
+
+
+def user_config_dir() -> Path:
+    return _xdg("XDG_CONFIG_HOME", ".config") / "pot"
+
+
+def state_dir() -> Path:
+    return _xdg("POT_STATE_DIR", ".local/state/pot")
+
+
+def config_file() -> Path:
+    return Path(os.environ["POT_CONFIG"]) if os.environ.get("POT_CONFIG") else user_config_dir() / "pot.toml"
+
+
+def env_file() -> Path:
+    """Secrets. The user config dir wins; a repo .env keeps development convenient."""
+    if os.environ.get("POT_ENV"):
+        return Path(os.environ["POT_ENV"])
+    candidate = user_config_dir() / "env"
+    return candidate if candidate.exists() else REPO_ROOT / ".env"
+
+
+def devices_file() -> Path:
+    """Tuya local keys, written by `pot lights keys`. Machine state, not config."""
+    return state_dir() / "devices.json"
 
 
 class AssistantConfig(BaseModel):
@@ -51,8 +81,21 @@ class VoiceConfig(BaseModel):
     async_tool_calls: bool = True
 
 
+class WakeConfig(BaseModel):
+    """Local wake word. Costs nothing at rest: audio only reaches OpenAI once this fires."""
+
+    model: str = "hey_jarvis"
+    threshold: float = Field(default=0.5, ge=0.05, le=0.99)
+    # Detection lands a few hundred ms after the word finishes, by which point you're already
+    # saying the request. Replaying this much recent audio stops the first syllables being lost.
+    preroll_seconds: float = Field(default=1.0, ge=0.0, le=3.0)
+    # How long the user can stay quiet before Pot stops listening and goes back to the wake word.
+    # Enforced by the model itself through turn_detection.idle_timeout_ms.
+    conversation_idle_seconds: int = Field(default=15, ge=2, le=120)
+
+
 class AudioConfig(BaseModel):
-    mode: Literal["push_to_talk", "always_on"] = "push_to_talk"
+    mode: Literal["push_to_talk", "always_on", "wake_word"] = "push_to_talk"
     # Reopen the mic by itself once Pot stops talking, so a conversation needs one keypress
     # rather than one per turn. Turn off if the speakers make Pot interrupt itself.
     auto_reopen: bool = True
@@ -63,6 +106,16 @@ class AudioConfig(BaseModel):
     sample_rate: int = 24000
     input_device: str = ""
     output_device: str = ""
+    wake: WakeConfig = Field(default_factory=WakeConfig)
+
+    @property
+    def uses_wake_word(self) -> bool:
+        return self.mode == "wake_word"
+
+    @property
+    def mic_open_at_start(self) -> bool:
+        """Only always-on starts sending audio immediately; the others wait for a trigger."""
+        return self.mode == "always_on"
 
 
 class SkillsConfig(BaseModel):
@@ -86,7 +139,7 @@ class SpotifyConfig(BaseModel):
     redirect_port: int = 8765
 
     def token_path(self) -> Path:
-        return STATE_DIR / "spotify-token.json"
+        return state_dir() / "spotify-token.json"
 
 
 class SpeakerConfig(BaseModel):
@@ -100,7 +153,7 @@ class SpeakerConfig(BaseModel):
     device: str = ""  # backend-specific output device, empty means default
 
     def cache_path(self) -> Path:
-        return STATE_DIR / "librespot"
+        return state_dir() / "librespot"
 
 
 class MusicConfig(BaseModel):
@@ -153,7 +206,7 @@ class LightsConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=REPO_ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=env_file(), env_file_encoding="utf-8", extra="ignore")
 
     openai_api_key: str = ""
     tuya_api_key: str = ""
@@ -180,18 +233,39 @@ def normalize(text: str) -> str:
     return " ".join(kept.split())
 
 
-def load_settings(config_file: Path | None = None, devices_file: Path | None = None) -> Settings:
-    config_file = config_file or CONFIG_FILE
-    devices_file = devices_file or DEVICES_FILE
+def deep_merge(base: dict, overlay: dict) -> dict:
+    """Overlay wins, but nested tables merge rather than replace.
 
-    data: dict = {}
-    if config_file.exists():
-        data = tomllib.loads(config_file.read_text())
+    Without this, setting one thing under [lights] in your own config would silently drop every
+    device and scene that came from the defaults.
+    """
+    merged = dict(base)
+    for key, value in overlay.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def read_config(defaults: Path | None = None, user: Path | None = None) -> dict[str, Any]:
+    defaults = DEFAULTS_FILE if defaults is None else defaults
+    user = config_file() if user is None else user
+    data: dict[str, Any] = tomllib.loads(defaults.read_text()) if defaults.exists() else {}
+    if user.exists() and user != defaults:
+        data = deep_merge(data, tomllib.loads(user.read_text()))
+    return data
+
+
+def load_settings(config_path: Path | None = None, keys_path: Path | None = None) -> Settings:
+    data = read_config(user=config_path)
+    keys_path = devices_file() if keys_path is None else keys_path
 
     lights_raw = dict(data.pop("lights", {}))
     device_entries = lights_raw.pop("devices", {})
     scenes = lights_raw.pop("scenes", {})
-    credentials = _load_credentials(devices_file)
+    credentials = _load_credentials(keys_path)
 
     devices: dict[str, LightDevice] = {}
     for key, entry in device_entries.items():
@@ -206,12 +280,12 @@ def load_settings(config_file: Path | None = None, devices_file: Path | None = N
     return Settings(**data, lights=LightsConfig(devices=devices, scenes=scenes))
 
 
-def _load_credentials(devices_file: Path) -> dict[str, dict]:
+def _load_credentials(path: Path) -> dict[str, dict]:
     """Read tinytuya-style devices.json into {gwid: {local_key, version}}."""
-    if not devices_file.exists():
+    if not path.exists():
         return {}
     try:
-        raw = json.loads(devices_file.read_text())
+        raw = json.loads(path.read_text())
     except json.JSONDecodeError:
         return {}
     entries = raw.get("devices", raw) if isinstance(raw, dict) else raw

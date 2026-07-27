@@ -17,8 +17,25 @@ dependencies = [
     "pydantic-settings>=2.14.2",
 ]
 
+[project.optional-dependencies]
+# Local wake word detection. Optional because onnxruntime and scipy are a big download, and a
+# push-to-talk install on a laptop doesn't need either.
+wakeword = [
+    "openwakeword>=0.6.0",
+    "onnxruntime>=1.20",
+    "scipy>=1.11",
+    "scikit-learn>=1.3",
+    "tqdm>=4.0",
+    "requests>=2.0",
+]
+
 [project.scripts]
 pot = "pot.cli:app"
+
+[tool.uv]
+# openWakeWord asks for tflite-runtime on Linux, which is deprecated, stops at cp311 and has
+# patchy aarch64 wheels. Its ONNX path needs none of it, so the marker is made unsatisfiable.
+override-dependencies = ["tflite-runtime; platform_system == 'Java'"]
 
 [dependency-groups]
 dev = [

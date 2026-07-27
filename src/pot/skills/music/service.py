@@ -95,13 +95,24 @@ def get_service() -> MusicService:
 
 def _create(rt: Runtime) -> MusicService:
     service = MusicService(rt.settings)
-    # Pot's speech is what triggers ducking; the session broadcasts it, skills subscribe.
-    rt.on_speech(lambda speaking: _on_speech(service, speaking))
+    # Music ducks while Pot talks and while Pot is listening for a request; the session
+    # broadcasts both and skills subscribe, so core never imports a skill.
+    reasons: set[str] = set()
+    rt.on_speech(lambda active: _set_quiet(service, reasons, "speaking", active))
+    rt.on_listen(lambda active: _set_quiet(service, reasons, "listening", active))
     return service
 
 
-def _on_speech(service: MusicService, speaking: bool) -> None:
-    coroutine = service.duck() if speaking else service.unduck()
+def _set_quiet(service: MusicService, reasons: set[str], reason: str, active: bool) -> None:
+    """Duck while any reason holds, and only restore once every one has cleared."""
+    was_quiet = bool(reasons)
+    reasons.add(reason) if active else reasons.discard(reason)
+    if bool(reasons) == was_quiet:
+        return
+    _spawn(service.duck() if reasons else service.unduck())
+
+
+def _spawn(coroutine) -> None:
     task = asyncio.create_task(coroutine)
     _pending.add(task)
     task.add_done_callback(_pending.discard)

@@ -33,7 +33,9 @@ class Runtime:
     _announce: Callable[[str], None] | None = None
     _usage: UsageMeter | None = field(default=None, repr=False)
     _speech_listeners: list[Callable[[bool], None]] = field(default_factory=list, repr=False)
+    _listen_listeners: list[Callable[[bool], None]] = field(default_factory=list, repr=False)
     _speaking: bool = False
+    _listening: bool = False
 
     @property
     def usage(self) -> UsageMeter:
@@ -56,19 +58,37 @@ class Runtime:
         """
         self._speech_listeners.append(callback)
 
+    def on_listen(self, callback: Callable[[bool], None]) -> None:
+        """Subscribe to "Pot started/stopped listening for a request".
+
+        Music ducks for this too: a speaker at full volume is the main reason a wake word gets
+        heard but the sentence after it doesn't.
+        """
+        self._listen_listeners.append(callback)
+
     def set_speaking(self, speaking: bool) -> None:
-        if speaking == self._speaking:
-            return
-        self._speaking = speaking
-        for listener in list(self._speech_listeners):
-            try:
-                listener(speaking)
-            except Exception:
-                log.debug("a speech listener failed", exc_info=True)
+        self._publish(self._speech_listeners, "_speaking", speaking)
+
+    def set_listening(self, listening: bool) -> None:
+        self._publish(self._listen_listeners, "_listening", listening)
 
     @property
     def speaking(self) -> bool:
         return self._speaking
+
+    @property
+    def listening(self) -> bool:
+        return self._listening
+
+    def _publish(self, listeners: list[Callable[[bool], None]], attribute: str, value: bool) -> None:
+        if getattr(self, attribute) == value:
+            return
+        setattr(self, attribute, value)
+        for listener in list(listeners):
+            try:
+                listener(value)
+            except Exception:
+                log.debug("a %s listener failed", attribute.lstrip("_"), exc_info=True)
 
     def on_announce(self, callback: Callable[[str], None] | None) -> None:
         self._announce = callback

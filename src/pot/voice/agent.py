@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from agents.realtime import RealtimeAgent, RealtimeRunConfig, RealtimeSessionModelSettings
-from agents.realtime.config import RealtimeAudioInputConfig
+from agents.realtime.config import RealtimeAudioInputConfig, RealtimeTurnDetectionConfig
 
 from pot.config import Settings
 from pot.skills.base import Skill
@@ -22,13 +22,19 @@ def build_agent(settings: Settings, skills: Sequence[Skill]) -> RealtimeAgent:
 
 
 def build_run_config(settings: Settings) -> RealtimeRunConfig:
+    # Nothing speculative goes in here. The SDK's types advertise turn_detection.idle_timeout_ms,
+    # but the API rejects it as an unknown parameter, and a rejected session update takes the
+    # whole configuration down with it: the model ends up with no tools and improvises excuses.
+    # Ending a wake-word conversation is handled locally instead, in voice/session.py.
+    turn_detection: RealtimeTurnDetectionConfig = {
+        "type": settings.voice.turn_detection,
+        "interrupt_response": True,
+        "create_response": True,
+    }
+
     audio_input: RealtimeAudioInputConfig = {
         "format": "pcm16",
-        "turn_detection": {
-            "type": settings.voice.turn_detection,
-            "interrupt_response": True,
-            "create_response": True,
-        },
+        "turn_detection": turn_detection,
         "noise_reduction": {"type": "near_field"},
     }
     # Transcribing the user's own audio is a separate per-minute charge and buys only the

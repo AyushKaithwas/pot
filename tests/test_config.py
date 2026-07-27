@@ -1,14 +1,33 @@
+"""Config layering.
+
+Your settings sit on top of the shipped defaults, which is what lets an install keep its own
+choices through an update and lets the repo ship no personal device ids at all. The merge has to
+be deep: a user setting one thing under [lights] must not wipe the defaults' other tables.
+"""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from pot.config import load_settings, normalize
+import pytest
 
-POT_TOML = """
+from pot.config import deep_merge, load_settings, normalize, read_config
+
+DEFAULTS = """
 [assistant]
 name = "Pot"
 
+[voice]
+voice = "ash"
+speed = 1.15
+
+[costs.models."gpt-realtime-2.1-mini"]
+audio_in = 10.0
+audio_out = 20.0
+"""
+
+USER = """
 [voice]
 voice = "cedar"
 
@@ -23,38 +42,74 @@ beta1 = { power = true, brightness_pct = 10 }
 """
 
 
-def test_local_keys_are_merged_from_devices_json(tmp_path: Path):
-    config = tmp_path / "pot.toml"
-    config.write_text(POT_TOML)
-    devices = tmp_path / "devices.json"
-    devices.write_text(json.dumps([{"id": "gw-1", "key": "secret-key", "version": "3.5"}]))
+@pytest.fixture
+def files(tmp_path: Path) -> tuple[Path, Path]:
+    defaults, user = tmp_path / "defaults.toml", tmp_path / "user.toml"
+    defaults.write_text(DEFAULTS)
+    user.write_text(USER)
+    return defaults, user
 
-    settings = load_settings(config, devices)
+
+def test_user_settings_win_over_shipped_ones(files):
+    defaults, user = files
+    merged = read_config(defaults=defaults, user=user)
+    assert merged["voice"]["voice"] == "cedar"
+
+
+def test_untouched_shipped_settings_survive(files):
+    defaults, user = files
+    merged = read_config(defaults=defaults, user=user)
+    assert merged["voice"]["speed"] == 1.15, "overriding one voice key must not drop the others"
+    assert merged["assistant"]["name"] == "Pot"
+    assert "gpt-realtime-2.1-mini" in merged["costs"]["models"]
+
+
+def test_a_missing_user_file_leaves_the_defaults_alone(files, tmp_path: Path):
+    defaults, _ = files
+    merged = read_config(defaults=defaults, user=tmp_path / "absent.toml")
+    assert merged["voice"]["voice"] == "ash"
+
+
+def test_deep_merge_replaces_scalars_and_lists_but_joins_tables():
+    base = {"a": {"keep": 1, "change": 1}, "list": [1, 2], "scalar": "x"}
+    overlay = {"a": {"change": 2}, "list": [3], "scalar": "y"}
+    assert deep_merge(base, overlay) == {
+        "a": {"keep": 1, "change": 2},
+        "list": [3],
+        "scalar": "y",
+    }
+
+
+def test_lights_come_from_the_user_file_with_keys_merged_in(files, tmp_path: Path):
+    defaults, user = files
+    keys = tmp_path / "devices.json"
+    keys.write_text(json.dumps([{"id": "gw-1", "key": "secret-key", "version": "3.5"}]))
+
+    settings = load_settings(config_path=user, keys_path=keys)
     device = settings.lights.devices["beta1"]
     assert device.local_key == "secret-key"
     assert device.version == 3.5
-    assert settings.voice.voice == "cedar"
     assert settings.lights.scenes["night"]["beta1"].brightness_pct == 10
 
 
-def test_missing_devices_json_leaves_keys_empty(tmp_path: Path):
-    config = tmp_path / "pot.toml"
-    config.write_text(POT_TOML)
-    settings = load_settings(config, tmp_path / "nope.json")
+def test_missing_device_keys_leave_the_light_declared_but_unusable(files, tmp_path: Path):
+    _, user = files
+    settings = load_settings(config_path=user, keys_path=tmp_path / "absent.json")
     assert settings.lights.devices["beta1"].local_key is None
 
 
-def test_defaults_apply_without_a_config_file(tmp_path: Path):
-    settings = load_settings(tmp_path / "absent.toml", tmp_path / "absent.json")
-    assert settings.assistant.name == "Pot"
+def test_the_shipped_defaults_are_valid_and_carry_no_devices():
+    """The repo is going public: it must ship settings, not somebody's house."""
+    settings = load_settings(config_path=Path("/nonexistent"), keys_path=Path("/nonexistent"))
     assert settings.voice.model == "gpt-realtime-2.1-mini"
-    assert settings.lights.devices == {}
+    assert settings.lights.devices == {}, "no personal device ids in the committed config"
+    assert settings.music.spotify.client_id == "", "no personal credentials either"
+    assert settings.costs.models, "but the rate table should ship"
 
 
-def test_match_terms_cover_name_room_and_aliases(tmp_path: Path):
-    config = tmp_path / "pot.toml"
-    config.write_text(POT_TOML)
-    device = load_settings(config, tmp_path / "absent.json").lights.devices["beta1"]
+def test_match_terms_cover_name_room_and_aliases(files, tmp_path: Path):
+    _, user = files
+    device = load_settings(config_path=user, keys_path=tmp_path / "absent.json").lights.devices["beta1"]
     assert {"beta1", "beta 1", "tube", "bedroom", "bedroom light"} <= device.match_terms()
 
 

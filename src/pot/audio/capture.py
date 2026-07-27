@@ -1,8 +1,12 @@
 """Microphone capture as an async stream of pcm16 chunks at the model's sample rate.
 
-Two details that matter in practice: not every input device will open at 24 kHz, so we fall
-back to the device's native rate and resample; and the stream is gated, because on a laptop
-with speakers an open mic hears Pot's own voice and interrupts itself.
+Two details that matter in practice: not every input device will open at 24 kHz, so we fall back
+to the device's native rate and resample; and capture never stops, because wake word detection
+needs the audio even when none of it is being sent anywhere.
+
+The gate is about *destination*, not capture. Closed means "don't send this to OpenAI", which is
+what keeps an idle room free and stops Pot's own voice from interrupting it. Whoever drains
+`chunks()` decides where each chunk goes.
 """
 
 from __future__ import annotations
@@ -110,7 +114,7 @@ class Microphone:
     def _on_audio(self, indata, frames: int, time_info, status) -> None:  # PortAudio thread
         if status:
             log.debug("input stream status: %s", status)
-        if not self.gate.is_open or self._loop is None:
+        if self._loop is None:
             return
         chunk = bytes(indata)
         if self._resampler is not None:

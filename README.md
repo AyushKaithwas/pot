@@ -4,20 +4,39 @@ A voice assistant that takes a whole sentence at a time. Speech-to-speech on Ope
 models, so "turn the tube light on at 30% warm, kill it in ten minutes, and tell me if it'll
 rain tomorrow" is one turn, not four commands.
 
-Runs on macOS now, on a Raspberry Pi 4 later. Wake word comes later too; for now the mic is
-push-to-talk.
+Runs on macOS for development and on a Raspberry Pi as a standalone device: local wake word, no
+screen, no keyboard, starts at boot. Audio only reaches OpenAI after the wake word fires, so an
+idle room costs nothing.
+
+MIT licensed. Skills are one file each, and the ones that exist (lights, music, timers, research)
+are as much examples as features.
 
 ## Setup
 
 ```bash
-brew install uv portaudio
+brew install uv portaudio          # macOS
 uv sync
-cp .env.example .env   # then fill in OPENAI_API_KEY
+uv run pot config init             # writes ~/.config/pot/pot.toml
 uv run pot doctor
 ```
 
-`doctor` tells you what's missing: keys, audio devices, and whether each configured light is
-answering on the network.
+Put `OPENAI_API_KEY` in `~/.config/pot/env` (or a `.env` beside the source while developing).
+`doctor` reports what's missing: keys, audio devices, the wake word model, and whether each
+configured light is answering on the network.
+
+### Where things live
+
+Nothing you configure lives in the repo, so an update never overwrites it and the repo ships
+nobody's house.
+
+| | |
+|---|---|
+| `~/.config/pot/pot.toml` | your settings, merged over the shipped defaults |
+| `~/.config/pot/env` | secrets |
+| `~/.local/state/pot/` | device keys, Spotify token, wake word cache |
+| `config/pot.toml` | shipped defaults, and the reference for every option |
+
+`pot config path` prints all of it, `pot config show` prints the merged result.
 
 ## Controlling the lights
 
@@ -37,13 +56,13 @@ One-time, on your side:
 3. In the project, **Devices** → **Link Tuya App Account** → **Add App Account**, and scan the
    QR code with Smart Life (Me → scan icon, top right). Your light should now appear in the
    project's device list.
-4. Copy the project's Access ID and Access Secret into `.env` as `TUYA_API_KEY` and
-   `TUYA_API_SECRET`, and set `TUYA_API_REGION` (`in`, `eu`, `us`, `cn`).
+4. Put the project's Access ID and Access Secret in `~/.config/pot/env` as `TUYA_API_KEY` and
+   `TUYA_API_SECRET`, with `TUYA_API_REGION` (`in`, `eu`, `us`, `cn`).
 
 Then:
 
 ```bash
-uv run pot lights keys     # pulls local keys into config/devices.json (gitignored)
+uv run pot lights keys     # pulls local keys into ~/.local/state/pot/devices.json
 uv run pot lights scan     # who's on the LAN, and at which protocol version
 uv run pot lights list     # configured lights and their current state
 uv run pot lights set beta1 --on -b 30 -t 20
@@ -51,8 +70,8 @@ uv run pot lights set beta1 --color ff8800
 uv run pot lights dps beta1   # raw data points, when a light behaves oddly
 ```
 
-Lights are configured in `config/pot.toml` by **gwId**, not IP, because DHCP moves them; Pot
-finds the current address from the device's own discovery broadcast at startup.
+Declare lights in `~/.config/pot/pot.toml` by **gwId**, not IP, because DHCP moves them; Pot finds
+the current address from the device's own discovery broadcast at startup.
 
 Two gotchas that cost time on the first device, in case a future one behaves oddly:
 
@@ -79,8 +98,8 @@ shared "sign in to Pot" to offer.
 
 1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → Create app.
 2. Redirect URI: `http://127.0.0.1:8765/callback`. Tick the Web API.
-3. Copy the Client ID into `client_id` under `[music.spotify]` in `config/pot.toml`. There's no
-   client secret to copy: Pot uses PKCE.
+3. Copy the Client ID into `client_id` under `[music.spotify]` in `~/.config/pot/pot.toml`.
+   There's no client secret to copy: Pot uses PKCE.
 4. `uv run pot music login`, approve in the browser.
 
 ```bash
@@ -133,9 +152,76 @@ so it will answer, hand back the mic, and keep working. A spinner stays up for a
 is in flight, saying what it's doing and that you can still interrupt, and each tool reports how
 long it took when it lands.
 
-Under `[audio]` in `config/pot.toml`: `auto_reopen = false` goes back to one keypress per turn
-(use it if the room echoes enough that Pot interrupts itself), and `mode = "always_on"` is fully
-hands-free, which is what the Pi will want with a proper mic.
+Under `[audio]`: `auto_reopen = false` goes back to one keypress per turn (use it if the room echoes
+enough that Pot interrupts itself), `mode = "always_on"` is hands-free with the mic permanently
+open, and `mode = "wake_word"` is what a real device wants.
+
+## On a Raspberry Pi
+
+A Pi with a USB mic and a powered speaker is the target: no screen, no keyboard, starts on its own.
+
+```bash
+sudo apt update && sudo apt install -y libportaudio2 git
+curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone <this repo> ~/pot && cd ~/pot
+uv venv --python 3.12          # not 3.13: onnxruntime's aarch64 wheels lag
+uv sync --extra wakeword
+```
+
+Python 3.12 is deliberate, and `--extra wakeword` pulls onnxruntime rather than the deprecated
+tflite-runtime openWakeWord asks for by default (that package stops at 3.11 and is patchy on ARM;
+a dependency override in `pyproject.toml` drops it). Everything else resolves to aarch64 wheels,
+so nothing compiles.
+
+Then check the hardware before blaming the software:
+
+```bash
+uv run pot audio devices        # names to put in input_device / output_device
+uv run pot audio test           # record 3s, play it back, report the level
+uv run pot audio wake           # say the wake word, watch the scores
+```
+
+Set `mode = "wake_word"` under `[audio]` in your config, then have it start at boot:
+
+```bash
+uv run pot service install      # writes a systemd *user* unit, no root
+systemctl --user enable --now pot
+sudo loginctl enable-linger $USER   # so it runs with nobody logged in
+```
+
+`pot service logs -f` follows the journal, which on a headless box is the only way to watch it
+work. Push-to-talk refuses to start without a terminal rather than coming up silently.
+
+## Wake word
+
+```toml
+[audio]
+mode = "wake_word"
+
+[audio.wake]
+model = "hey_jarvis"    # or alexa, hey_mycroft, hey_rhasspy
+threshold = 0.5
+preroll_seconds = 1.0
+conversation_idle_seconds = 15
+```
+
+The microphone runs constantly but **audio only reaches OpenAI after the word fires**, so an empty
+room costs nothing. After that the mic stays open for follow-ups until the conversation goes quiet
+for `conversation_idle_seconds`, then it closes and waits for the word again.
+
+Two details that took measuring:
+
+- **Pre-roll.** Detection completes a few hundred milliseconds after the word ends, by which point
+  you're already talking. Pot replays the last second of audio so the start of the request isn't
+  clipped, which is what real assistants do.
+- **The conversation timeout is local.** The Realtime API appears to offer
+  `turn_detection.idle_timeout_ms`, and the SDK's types advertise it, but the server rejects it as
+  an unknown parameter, which silently discards the whole session config and leaves the model with
+  no tools at all. It's a timer here instead.
+
+A custom "hey pot" needs a training run rather than a config change, so a stock trigger comes
+first. Tune `threshold` in your actual room with `pot audio wake`; lower catches more and misfires
+more.
 
 ## As an audio-only device
 
@@ -150,14 +236,14 @@ terminal says has a sound:
 | low buzz | something failed |
 
 Cues never play over Pot's own speech, because playback is a queue rather than a mixer: a cue
-during a reply would land after it. Tune with `cues` and `cue_volume` under `[audio]`, and pass
-`--quiet` to silence them.
+during a reply would land after it. Tune with `cues` and `cue_volume` under `[audio]`, `pot audio
+cues` plays them, and `--quiet` silences them.
 
 ```bash
 uv run pot talk --hands-free      # always-on mic, no keypress to start
 ```
 
-Two things still assume a laptop, and both have a workaround until the setup pass lands:
+One thing still assumes a laptop, with a workaround:
 
 - **Spotify login needs a browser.** On a headless box, forward the callback port and run the
   login there, then open the printed URL on your laptop:
@@ -165,11 +251,8 @@ Two things still assume a laptop, and both have a workaround until the setup pas
   ssh -L 8765:127.0.0.1:8765 pi@pot
   uv run pot music login --no-browser
   ```
-- **Config is a file.** Editing `config/pot.toml` over SSH works, but a real product needs the
-  setup wizard.
-
-Still to build for a screenless device: a wake word (so there's no keypress at all), a physical
-button as a fallback, and running under systemd so there's no `q` to quit.
+Still to build: a custom "hey pot" model, echo cancellation for wake-word-while-music, and a setup
+wizard so provider credentials don't need an SSH session.
 
 ## What it costs
 
@@ -186,7 +269,8 @@ model on audio both ways), `gpt-5.4-nano` for lookups with `gpt-5.6` held back f
 `depth="deep"`, input transcription off, and output capped at 800 tokens. Measured on the same
 two exchanges, one light command plus one weather question: **$0.078 before, $0.0102 after.**
 
-Rates live under `[costs.models]` in `config/pot.toml` as dollars per million tokens. When
+Rates live under `[costs.models]` as dollars per million tokens (shipped defaults, overridable in
+your own config). When
 OpenAI's prices move, edit that table and nothing else; `pot doctor` warns if a model in use has
 no rates configured.
 
@@ -247,7 +331,9 @@ with the session. See `src/pot/skills/lights/service.py`.
 | `src/pot/skills/lights/` | discovery, provider chain (LAN → cloud), alias resolution |
 | `src/pot/skills/music/` | Spotify auth, Web API client, speaker choice, ducking |
 | `src/pot/scheduler.py` | deferred actions: timers, "in ten minutes" |
-| `config/pot.toml` | models, voice, audio devices, lights, scenes |
+| `src/pot/audio/wake.py` | local wake word: framing, resampling, debounce |
+| `src/pot/service.py` | the systemd user unit |
+| `config/pot.toml` | shipped defaults: every option with a comment |
 
 ## Development
 
