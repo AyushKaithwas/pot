@@ -36,12 +36,23 @@ class RecordingWake(WakeWord):
 
 @pytest.fixture
 def wake() -> RecordingWake:
-    return RecordingWake(model="hey_jarvis", threshold=0.5, sample_rate=SESSION_RATE)
+    return RecordingWake(models=["hey_mycroft"], threshold=0.5, sample_rate=SESSION_RATE)
 
 
 def test_the_real_model_loads_over_onnx(wake: RecordingWake):
     """The library defaults to tflite, whose runtime is deprecated and ARM-hostile."""
-    assert wake.model_name == "hey_jarvis"
+    assert wake.model_names == ["hey_mycroft"]
+
+
+def test_several_triggers_can_run_at_once():
+    """Any of them firing is enough, which is the cheap way to be heard more reliably."""
+    several = RecordingWake(models=["hey_mycroft", "alexa"], sample_rate=SESSION_RATE)
+    assert several.model_names == ["hey_mycroft", "alexa"]
+    assert several.spoken == "hey mycroft or alexa"
+
+
+def test_a_single_name_is_accepted_as_well():
+    assert RecordingWake(models="alexa", sample_rate=SESSION_RATE).model_names == ["alexa"]
 
 
 def test_frames_are_exactly_what_the_model_expects(wake: RecordingWake):
@@ -85,8 +96,17 @@ def test_reset_clears_buffered_audio(wake: RecordingWake):
     assert not wake.frames, "buffered audio from before the reset must not complete a frame"
 
 
+def test_reset_also_lifts_the_debounce(wake: RecordingWake):
+    """After a conversation ends, the next wake word must work straight away."""
+    wake.scores = [0.9] * 20
+    assert wake.feed(silence(200)) is True
+    wake.reset()
+    wake.scores = [0.9] * 20
+    assert wake.feed(silence(200)) is True
+
+
 def test_no_resampler_when_already_at_the_detector_rate():
-    wake = RecordingWake(model="hey_jarvis", sample_rate=DETECTOR_RATE)
+    wake = RecordingWake(models=["hey_mycroft"], sample_rate=DETECTOR_RATE)
     wake.feed(silence(200, rate=DETECTOR_RATE))
     total = sum(frame.shape[0] for frame in wake.frames)
     assert abs(total - DETECTOR_RATE * 0.2) < FRAME_SAMPLES

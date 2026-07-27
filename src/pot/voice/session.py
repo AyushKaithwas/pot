@@ -146,7 +146,7 @@ def _build_wake_word(audio: AudioConfig) -> WakeWord | None:
     if not audio.uses_wake_word:
         return None
     try:
-        return WakeWord(audio.wake.model, threshold=audio.wake.threshold, sample_rate=audio.sample_rate)
+        return WakeWord(audio.wake.models, threshold=audio.wake.threshold, sample_rate=audio.sample_rate)
     except WakeWordUnavailable as exc:
         # Falling back silently would leave a screenless device deaf with no explanation.
         raise RuntimeError(f"wake word mode needs a working wake word: {exc}") from exc
@@ -154,7 +154,7 @@ def _build_wake_word(audio: AudioConfig) -> WakeWord | None:
 
 def _how_to_talk(audio: AudioConfig, wake: WakeWord | None) -> str:
     if wake is not None:
-        return f'say "{wake.model_name.replace("_", " ")}" to start · q = quit'
+        return f'say "{wake.spoken}" to start · q = quit'
     if audio.mode == "always_on":
         return "always-on mic · q = quit"
     if audio.auto_reopen:
@@ -322,7 +322,7 @@ async def _close_when_idle(
         if not window.expired():
             continue
         window.stop()
-        spoken = wake.model_name.replace("_", " ") if wake is not None else "the wake word"
+        spoken = wake.spoken if wake is not None else "the wake word"
         _stop_listening(gate, runtime, cues, f'quiet · say "{spoken}" again')
 
 

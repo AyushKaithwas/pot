@@ -33,7 +33,8 @@ class FakeMicrophone:
 class FakeWake:
     """Fires on the chunk named in `fire_on`."""
 
-    model_name = "hey_jarvis"
+    model_names = ["hey_mycroft"]
+    spoken = "hey mycroft"
 
     def __init__(self, fire_on: bytes | None = None) -> None:
         self.fire_on = fire_on
@@ -175,7 +176,7 @@ def test_no_idle_timeout_is_sent_to_the_api():
 def test_the_prompt_tells_you_how_to_start():
     assert "space" in _how_to_talk(AudioConfig(), None)
     assert "always-on" in _how_to_talk(AudioConfig(mode="always_on"), None)
-    assert "hey jarvis" in _how_to_talk(AudioConfig(mode="wake_word"), FakeWake())
+    assert "hey mycroft" in _how_to_talk(AudioConfig(mode="wake_word"), FakeWake())
 
 
 def test_only_always_on_starts_with_the_mic_sending():

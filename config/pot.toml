@@ -36,10 +36,15 @@ input_device = ""       # substring of the device name, empty = system default. 
 output_device = ""
 
 [audio.wake]
-# Needs the extra: uv sync --extra wakeword. Stock triggers are alexa, hey_jarvis, hey_mycroft
-# and hey_rhasspy; a custom "hey pot" is a training run, not a config change.
-model = "hey_jarvis"
+# Needs the extra: uv sync --extra wakeword. Any listed trigger wakes Pot, and extra models cost
+# about 1 ms per 80 ms of audio each, so listing two is a cheap way to be heard more reliably.
+#
+# The stock models differ a lot. Across three voices at three volumes, hey_mycroft fired 9/9
+# (median 1.000) and alexa 9/9 (0.931), but hey_jarvis only 6/9 and scored 0.14 on one voice.
+# alexa is reliable but will also wake a real Echo in the room. hey_rhasspy is the fourth option.
+models = ["hey_mycroft"]
 threshold = 0.5                 # lower catches more and misfires more; tune with `pot audio wake`
+preroll_seconds = 1.0           # replayed on wake so the start of your request isn't clipped
 conversation_idle_seconds = 15  # quiet for this long and Pot goes back to waiting for the word
 
 [skills]

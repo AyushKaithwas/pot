@@ -441,12 +441,13 @@ def _check_audio(settings: Settings) -> None:
     if not available():
         _check("wake word extra installed (uv sync --extra wakeword)", False)
         return
-    if audio.wake.model not in stock_models() and not audio.wake.model.endswith(".onnx"):
-        _check(f"wake word {audio.wake.model!r} exists (have: {', '.join(stock_models())})", False)
+    unknown = [name for name in audio.wake.models if name not in stock_models()]
+    if unknown:
+        _check(f"wake words exist (unknown: {', '.join(unknown)}; have: {', '.join(stock_models())})", False)
         return
     _check(
-        f"wake word {audio.wake.model!r} downloaded (first run fetches ~5 MB)",
-        is_downloaded(audio.wake.model),
+        f"wake word(s) {', '.join(audio.wake.models)} downloaded (first run fetches ~5 MB each)",
+        is_downloaded(*audio.wake.models),
     )
 
 
@@ -548,7 +549,7 @@ def audio_wake(seconds: float = typer.Option(30.0, "--seconds", "-s", help="How 
             async for chunk in microphone.chunks():
                 if wake.feed(chunk):
                     hits += 1
-                    console.print(f"[green]fired[/green] at {wake.last_score:.3f}")
+                    console.print(f"[green]fired[/green] on {wake.last_model} at {wake.last_score:.3f}")
                 best = max(best, wake.last_score)
                 if asyncio.get_running_loop().time() >= deadline:
                     break

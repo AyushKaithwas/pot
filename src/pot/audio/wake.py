@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -63,27 +64,34 @@ def model_files(model: str) -> list[Path]:
     return [path.with_suffix(".onnx") for path in paths]
 
 
-def is_downloaded(model: str) -> bool:
+def is_downloaded(*models: str) -> bool:
     if not available():
         return False
     try:
-        return all(path.exists() for path in model_files(model))
+        return all(path.exists() for model in models for path in model_files(model))
     except WakeWordUnavailable:
         return False
 
 
-def download(model: str) -> None:
-    """Fetch the model files, about 5 MB. Needs network, once."""
+def download(*models: str) -> None:
+    """Fetch the model files, about 5 MB each. Needs network, once."""
     from openwakeword.utils import download_models
 
-    log.info("downloading wake word model %s", model)
-    download_models([model])
+    for model in models:
+        log.info("downloading wake word model %s", model)
+        download_models([model])
 
 
 class WakeWord:
+    """Listens for one or more trigger phrases, firing on whichever is heard.
+
+    Several models cost almost nothing (about 1 ms per 80 ms frame each) and meaningfully improve
+    the hit rate, since the stock models differ a lot in how reliably they catch a given voice.
+    """
+
     def __init__(
         self,
-        model: str = "hey_jarvis",
+        models: Sequence[str] | str = ("hey_mycroft",),
         *,
         threshold: float = 0.5,
         sample_rate: int = 24000,
@@ -93,16 +101,21 @@ class WakeWord:
             raise WakeWordUnavailable(f"openWakeWord is not installed. {INSTALL_HINT}")
         from openwakeword.model import Model
 
-        self.model_name = model
+        self.model_names = [models] if isinstance(models, str) else list(models)
+        if not self.model_names:
+            raise WakeWordUnavailable("no wake word configured")
         self.threshold = threshold
         self.last_score = 0.0
+        self.last_model = ""
 
-        if not is_downloaded(model):
+        missing = [name for name in self.model_names if not is_downloaded(name)]
+        if missing:
             if not download_if_missing:
-                raise WakeWordUnavailable(f"wake word model {model!r} is not downloaded")
-            download(model)
+                raise WakeWordUnavailable(f"wake word model(s) not downloaded: {', '.join(missing)}")
+            download(*missing)
 
-        self._model = Model(wakeword_models=[model], inference_framework="onnx")
+        # A copy, because Model rewrites the list it's given into resolved file paths in place.
+        self._model = Model(wakeword_models=list(self.model_names), inference_framework="onnx")
         self._resampler = (
             soxr.ResampleStream(sample_rate, DETECTOR_RATE, 1, dtype="int16")
             if sample_rate != DETECTOR_RATE
@@ -129,17 +142,32 @@ class WakeWord:
         return detected
 
     def reset(self) -> None:
-        """Forget the audio heard so far, so a new listen starts clean."""
+        """Forget everything heard so far, so the next listen starts clean.
+
+        That includes the debounce: it exists to stop one utterance firing twice, not to make the
+        wake word unavailable for two seconds after a conversation ends.
+        """
         self._buffer.clear()
         self.last_score = 0.0
+        self._muted_until = 0.0
         reset = getattr(self._model, "reset", None)
         if reset is not None:
             reset()
 
+    @property
+    def spoken(self) -> str:
+        return " or ".join(name.replace("_", " ") for name in self.model_names)
+
+    def scores(self, frame: np.ndarray) -> dict[str, float]:
+        """Per-model scores for one frame, for tuning and diagnostics."""
+        raw = self._model.predict(frame)
+        return {name: float(raw.get(name, 0.0)) for name in self.model_names}
+
     def _score(self, frame: np.ndarray) -> float:
-        """How much this frame sounds like the wake word. Overridden in tests."""
-        scores = self._model.predict(frame)
-        return float(scores.get(self.model_name, 0.0))
+        """The best score across the configured triggers. Overridden in tests."""
+        scores = self.scores(frame)
+        self.last_model = max(scores, key=scores.get) if scores else ""
+        return max(scores.values(), default=0.0)
 
     def _should_fire(self) -> bool:
         """Threshold plus debounce, kept out of scoring so both are always applied."""
@@ -149,5 +177,5 @@ class WakeWord:
         if now < self._muted_until:
             return False
         self._muted_until = now + COOLDOWN_SECONDS
-        log.info("wake word %s fired at %.2f", self.model_name, self.last_score)
+        log.info("wake word %s fired at %.2f", self.last_model or self.model_names[0], self.last_score)
         return True

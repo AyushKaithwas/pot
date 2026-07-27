@@ -17,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from pot.usage import Rates
@@ -84,14 +84,31 @@ class VoiceConfig(BaseModel):
 class WakeConfig(BaseModel):
     """Local wake word. Costs nothing at rest: audio only reaches OpenAI once this fires."""
 
-    model: str = "hey_jarvis"
+    # Any of these firing wakes Pot, so a second trigger is a cheap way to improve hit rate.
+    #
+    # The stock models are not equally good. Measured across three voices at three volumes,
+    # hey_mycroft fired 9/9 (median score 1.000) and alexa 9/9 (0.931), while hey_jarvis managed
+    # only 6/9 and scored 0.14 on one voice, which feels exactly like "it ignored me again".
+    # alexa works well but will also set off an Echo in the same room.
+    models: list[str] = Field(default_factory=lambda: ["hey_mycroft"])
     threshold: float = Field(default=0.5, ge=0.05, le=0.99)
     # Detection lands a few hundred ms after the word finishes, by which point you're already
     # saying the request. Replaying this much recent audio stops the first syllables being lost.
     preroll_seconds: float = Field(default=1.0, ge=0.0, le=3.0)
-    # How long the user can stay quiet before Pot stops listening and goes back to the wake word.
-    # Enforced by the model itself through turn_detection.idle_timeout_ms.
+    # How long you can stay quiet before Pot stops listening and waits for the word again.
+    # Timed locally: the API rejects turn_detection.idle_timeout_ms.
     conversation_idle_seconds: int = Field(default=15, ge=2, le=120)
+
+    @field_validator("models", mode="before")
+    @classmethod
+    def _accept_a_single_name(cls, value: object) -> object:
+        """`models = "alexa"` is the obvious thing to write, so accept it."""
+        return [value] if isinstance(value, str) else value
+
+    @property
+    def spoken(self) -> str:
+        """How to tell someone what to say."""
+        return " or ".join(name.replace("_", " ") for name in self.models)
 
 
 class AudioConfig(BaseModel):

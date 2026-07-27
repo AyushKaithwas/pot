@@ -199,11 +199,27 @@ work. Push-to-talk refuses to start without a terminal rather than coming up sil
 mode = "wake_word"
 
 [audio.wake]
-model = "hey_jarvis"    # or alexa, hey_mycroft, hey_rhasspy
+models = ["hey_mycroft"]   # any of them firing wakes Pot
 threshold = 0.5
 preroll_seconds = 1.0
 conversation_idle_seconds = 15
 ```
+
+**Pick the model carefully; the stock ones are not equally good.** Measured across three voices at
+three volumes:
+
+| model | fired | median score |
+|---|---|---|
+| hey_mycroft | 9/9 | 1.000 |
+| alexa | 9/9 | 0.931 |
+| hey_jarvis | 6/9 | 0.757 |
+
+`hey_jarvis` scored 0.14 on one voice, which in use feels exactly like being ignored. `alexa` is
+reliable but will also wake a real Echo in the room. Listing two models costs about 1 ms per 80 ms
+of audio each, so it's a cheap way to be heard more often.
+
+Real detections score around 1.000 and 40 seconds of a quiet room peaked at 0.000, so the default
+threshold has plenty of margin; there's little reason to lower it.
 
 The microphone runs constantly but **audio only reaches OpenAI after the word fires**, so an empty
 room costs nothing. After that the mic stays open for follow-ups until the conversation goes quiet
