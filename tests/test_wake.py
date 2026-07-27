@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pot.audio.wake import DETECTOR_RATE, FRAME_SAMPLES, WakeWord, available
+from pot.audio.wake import DETECTOR_RATE, FRAME_SAMPLES, OpenWakeWordEngine, WakeWord, available
 
 pytestmark = pytest.mark.skipif(not available(), reason="wake word extra not installed")
 
@@ -22,10 +22,10 @@ def silence(milliseconds: int, rate: int = SESSION_RATE) -> bytes:
 
 
 class RecordingWake(WakeWord):
-    """A real WakeWord with scoring swapped out, so framing and debounce can be inspected."""
+    """A real detector with scoring swapped out, so framing and debounce can be inspected."""
 
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
+    def __init__(self, models=("hey_mycroft",), **kwargs) -> None:
+        super().__init__(OpenWakeWordEngine(models), **kwargs)
         self.frames: list[np.ndarray] = []
         self.scores: list[float] = []
 
@@ -36,7 +36,7 @@ class RecordingWake(WakeWord):
 
 @pytest.fixture
 def wake() -> RecordingWake:
-    return RecordingWake(models=["hey_mycroft"], threshold=0.5, sample_rate=SESSION_RATE)
+    return RecordingWake(["hey_mycroft"], threshold=0.5, sample_rate=SESSION_RATE)
 
 
 def test_the_real_model_loads_over_onnx(wake: RecordingWake):
@@ -46,13 +46,13 @@ def test_the_real_model_loads_over_onnx(wake: RecordingWake):
 
 def test_several_triggers_can_run_at_once():
     """Any of them firing is enough, which is the cheap way to be heard more reliably."""
-    several = RecordingWake(models=["hey_mycroft", "alexa"], sample_rate=SESSION_RATE)
+    several = RecordingWake(["hey_mycroft", "alexa"], sample_rate=SESSION_RATE)
     assert several.model_names == ["hey_mycroft", "alexa"]
     assert several.spoken == "hey mycroft or alexa"
 
 
 def test_a_single_name_is_accepted_as_well():
-    assert RecordingWake(models="alexa", sample_rate=SESSION_RATE).model_names == ["alexa"]
+    assert RecordingWake("alexa", sample_rate=SESSION_RATE).model_names == ["alexa"]
 
 
 def test_frames_are_exactly_what_the_model_expects(wake: RecordingWake):
@@ -106,7 +106,7 @@ def test_reset_also_lifts_the_debounce(wake: RecordingWake):
 
 
 def test_no_resampler_when_already_at_the_detector_rate():
-    wake = RecordingWake(models=["hey_mycroft"], sample_rate=DETECTOR_RATE)
+    wake = RecordingWake(["hey_mycroft"], sample_rate=DETECTOR_RATE)
     wake.feed(silence(200, rate=DETECTOR_RATE))
     total = sum(frame.shape[0] for frame in wake.frames)
     assert abs(total - DETECTOR_RATE * 0.2) < FRAME_SAMPLES

@@ -21,6 +21,7 @@ from pot.audio.cues import Cues
 from pot.audio.playback import Speaker
 from pot.audio.ptt import keypresses, raw_terminal
 from pot.audio.wake import WakeWord, WakeWordUnavailable
+from pot.audio.wake import build as build_wake
 from pot.config import AudioConfig, Settings
 from pot.console import console
 from pot.runtime import Runtime, set_runtime
@@ -77,7 +78,7 @@ async def run_voice(settings: Settings) -> None:
         volume=audio_config.cue_volume,
         enabled=audio_config.cues,
     )
-    wake = _build_wake_word(audio_config)
+    wake = _build_wake_word(settings)
     window = ConversationWindow(audio_config.wake.conversation_idle_seconds)
 
     console.print(
@@ -142,11 +143,11 @@ def _check_input_is_reachable(audio: AudioConfig) -> None:
     )
 
 
-def _build_wake_word(audio: AudioConfig) -> WakeWord | None:
-    if not audio.uses_wake_word:
+def _build_wake_word(settings: Settings) -> WakeWord | None:
+    if not settings.audio.uses_wake_word:
         return None
     try:
-        return WakeWord(audio.wake.models, threshold=audio.wake.threshold, sample_rate=audio.sample_rate)
+        return build_wake(settings.audio)
     except WakeWordUnavailable as exc:
         # Falling back silently would leave a screenless device deaf with no explanation.
         raise RuntimeError(f"wake word mode needs a working wake word: {exc}") from exc

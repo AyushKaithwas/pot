@@ -436,19 +436,17 @@ def _check_audio(settings: Settings) -> None:
     console.print(f"  mode: {audio.mode}")
     if not audio.uses_wake_word:
         return
-    from pot.audio.wake import available, is_downloaded, stock_models
+    from pot.audio.wake import WakeWordUnavailable, build, triggers_for
 
-    if not available():
-        _check("wake word extra installed (uv sync --extra wakeword)", False)
+    console.print(f"  wake: listening for {', '.join(triggers_for(audio.wake))}")
+    try:
+        # Actually building it is the only honest check: it covers the extra being installed, the
+        # models being present, and the names existing.
+        build(audio)
+    except WakeWordUnavailable as exc:
+        _check(f"wake word ready ({exc})", False)
         return
-    unknown = [name for name in audio.wake.models if name not in stock_models()]
-    if unknown:
-        _check(f"wake words exist (unknown: {', '.join(unknown)}; have: {', '.join(stock_models())})", False)
-        return
-    _check(
-        f"wake word(s) {', '.join(audio.wake.models)} downloaded (first run fetches ~5 MB each)",
-        is_downloaded(*audio.wake.models),
-    )
+    _check("wake word ready", True)
 
 
 @audio_app.command("devices")
@@ -524,24 +522,94 @@ def audio_cues() -> None:
     asyncio.run(run())
 
 
+@audio_app.command("benchmark")
+def audio_benchmark(
+    repeats: int = typer.Option(3, "--repeats", "-n", min=1, max=10, help="Takes per phrase"),
+    seconds: float = typer.Option(2.5, "--seconds", "-s", help="Recording window per take"),
+) -> None:
+    """Score every stock wake word against your own voice, and recommend one.
+
+    The stock models are trained on synthetic speech, so which one hears you is close to luck.
+    This measures it instead of guessing.
+    """
+    from pot.audio.diagnose import peak_level, record, score_recording
+    from pot.audio.wake import available, download, is_downloaded, stock_models
+
+    settings = _setup().settings
+    engine = settings.audio.wake.engine
+    if not available(engine):
+        extra = "porcupine" if engine == "porcupine" else "wakeword"
+        console.print(f"[red]{engine} not installed: uv sync --extra {extra}[/red]")
+        raise typer.Exit(1)
+
+    # The phrase triggers, not the timer/weather classifiers openWakeWord also ships.
+    candidates = [name for name in stock_models(engine) if name not in {"timer", "weather"}]
+    if engine == "porcupine":
+        # Porcupine ships ~20 keywords; testing them all would take ten minutes of talking.
+        candidates = [name for name in candidates if name in {"computer", "jarvis", "bumblebee", "picovoice"}]
+
+    async def run() -> None:
+        missing = [name for name in candidates if not is_downloaded(name)]
+        if missing:
+            console.print(f"fetching {len(missing)} model(s), about 1 MB each")
+            download(*missing)
+
+        totals: dict[str, list[float]] = {name: [] for name in candidates}
+        for model in candidates:
+            spoken = model.replace("_", " ")
+            for take in range(1, repeats + 1):
+                console.print(f'say "[bold]{spoken}[/bold]" ({take}/{repeats})')
+                pcm = await record(settings.audio, seconds)
+                level = peak_level(pcm)
+                if level < 0.02:
+                    console.print("  [yellow]heard nothing; is the right mic selected?[/yellow]")
+                scores = await score_recording([model], pcm, settings.audio.sample_rate)
+                peak = scores[model]["peak"]
+                totals[model].append(peak)
+                mark = "[green]would fire[/green]" if peak >= 0.5 else "[red]too quiet[/red]"
+                console.print(f"  peak {peak:.3f} · level {level:.0%} · {mark}")
+
+        table = Table("wake word", "hits", "best", "worst", "verdict")
+        best_model, best_worst = "", -1.0
+        for model, peaks in totals.items():
+            hits = sum(1 for value in peaks if value >= 0.5)
+            worst = min(peaks)
+            if worst > best_worst:
+                best_model, best_worst = model, worst
+            verdict = "reliable" if hits == len(peaks) and worst > 0.7 else "patchy" if hits else "no"
+            table.add_row(
+                model.replace("_", " "), f"{hits}/{len(peaks)}", f"{max(peaks):.3f}", f"{worst:.3f}", verdict
+            )
+        console.print(table)
+        if best_worst >= 0.7:
+            console.print(f"best for your voice: [bold]{best_model}[/bold] (worst take {best_worst:.3f})")
+            console.print(f'  set models = ["{best_model}"] under \\[audio.wake]')
+        else:
+            console.print(
+                "[yellow]none of the stock models hear you reliably.[/yellow] A model trained on "
+                "your own voice is the fix; see the wake word section of the README."
+            )
+
+    asyncio.run(run())
+
+
 @audio_app.command("wake")
 def audio_wake(seconds: float = typer.Option(30.0, "--seconds", "-s", help="How long to listen")) -> None:
     """Listen and report wake word scores, for tuning the threshold in the actual room."""
     from pot.audio.capture import Microphone
-    from pot.audio.wake import WakeWord, WakeWordUnavailable
+    from pot.audio.wake import WakeWordUnavailable, build
 
     settings = _setup().settings
     audio = settings.audio
 
     async def run() -> None:
         try:
-            wake = WakeWord(audio.wake.model, threshold=audio.wake.threshold, sample_rate=audio.sample_rate)
+            wake = build(audio)
         except WakeWordUnavailable as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1) from exc
 
-        spoken = audio.wake.model.replace("_", " ")
-        console.print(f'say "{spoken}" · threshold {audio.wake.threshold} · listening {seconds:g}s')
+        console.print(f'say "{wake.spoken}" · threshold {audio.wake.threshold} · listening {seconds:g}s')
         microphone = Microphone(sample_rate=audio.sample_rate, device_name=audio.input_device)
         best, hits = 0.0, 0
         async with microphone:

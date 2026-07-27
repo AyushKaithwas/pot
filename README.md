@@ -205,6 +205,10 @@ preroll_seconds = 1.0
 conversation_idle_seconds = 15
 ```
 
+Detection runs entirely on the machine. The stock models are fetched once (~1 MB each) and after
+that nothing is uploaded, which is the same promise as the wake gate itself: nothing leaves the
+room until you speak to it.
+
 **Pick the model carefully; the stock ones are not equally good.** Measured across three voices at
 three volumes:
 
@@ -220,6 +224,17 @@ of audio each, so it's a cheap way to be heard more often.
 
 Real detections score around 1.000 and 40 seconds of a quiet room peaked at 0.000, so the default
 threshold has plenty of margin; there's little reason to lower it.
+
+**`pot audio benchmark` measures the stock models against your own voice** and names the best one,
+or tells you plainly that none of them hear you well. If that's the answer, train a model for the
+phrase you want: see [docs/custom-wake-word.md](docs/custom-wake-word.md). A path ending `.onnx`
+goes straight into `models`.
+
+A commercial engine (Porcupine) was tried here and removed. It detects better, but its library
+opens sockets, carries a vendor hostname and reads the machine's platform UUID, and its free tier
+is non-commercial. No audio leaves the device, but handing a vendor a device fingerprint to listen
+for its own name is the wrong trade for this project. The engine seam in `src/pot/audio/wake/`
+remains, so another engine is one class implementing `scores`.
 
 The microphone runs constantly but **audio only reaches OpenAI after the word fires**, so an empty
 room costs nothing. After that the mic stays open for follow-ups until the conversation goes quiet

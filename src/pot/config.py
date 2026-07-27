@@ -84,13 +84,15 @@ class VoiceConfig(BaseModel):
 class WakeConfig(BaseModel):
     """Local wake word. Costs nothing at rest: audio only reaches OpenAI once this fires."""
 
-    # Any of these firing wakes Pot, so a second trigger is a cheap way to improve hit rate.
+    # Stock model names (hey_mycroft, alexa, hey_jarvis, hey_rhasspy) or a path to an .onnx model
+    # trained on your own voice. Any listed trigger firing wakes Pot, and each costs about 1 ms
+    # per 80 ms of audio, so listing several is a cheap way to be heard more often.
     #
-    # The stock models are not equally good. Measured across three voices at three volumes,
-    # hey_mycroft fired 9/9 (median score 1.000) and alexa 9/9 (0.931), while hey_jarvis managed
-    # only 6/9 and scored 0.14 on one voice, which feels exactly like "it ignored me again".
-    # alexa works well but will also set off an Echo in the same room.
-    models: list[str] = Field(default_factory=lambda: ["hey_mycroft"])
+    # The stock models are trained on synthetic speech and differ a lot on real voices. Measured
+    # across three voices at three volumes: hey_mycroft fired 9/9 (median 1.000), alexa 9/9
+    # (0.931), hey_jarvis only 6/9 with 0.14 on one voice. `pot audio benchmark` measures them
+    # against your voice, which is the only comparison that counts.
+    models: list[str] = Field(default_factory=list)
     threshold: float = Field(default=0.5, ge=0.05, le=0.99)
     # Detection lands a few hundred ms after the word finishes, by which point you're already
     # saying the request. Replaying this much recent audio stops the first syllables being lost.
@@ -108,7 +110,7 @@ class WakeConfig(BaseModel):
     @property
     def spoken(self) -> str:
         """How to tell someone what to say."""
-        return " or ".join(name.replace("_", " ") for name in self.models)
+        return " or ".join(name.replace("_", " ") for name in self.models) or "the wake word"
 
 
 class AudioConfig(BaseModel):

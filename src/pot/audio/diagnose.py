@@ -80,6 +80,45 @@ async def record(audio: AudioConfig, seconds: float) -> bytes:
     return bytes(collected)
 
 
+async def score_recording(models: list[str], pcm: bytes, sample_rate: int) -> dict[str, dict[str, float]]:
+    """Run one recording past several wake models and report peak and median frame scores.
+
+    Comparing models on *your* voice in *your* room is the only comparison that matters: the stock
+    models are trained on synthetic speech, so which one hears you is largely luck of the draw.
+    """
+    import numpy as np
+
+    from pot.audio.wake import OpenWakeWordEngine, WakeWord
+
+    results: dict[str, dict[str, float]] = {}
+    for model in models:
+        detector = OpenWakeWordEngine([model])
+        # Threshold of 0.99 so nothing fires; we only want the raw scores.
+        wake = WakeWord(detector, threshold=0.99, sample_rate=sample_rate)
+        scores: list[float] = []
+        step = detector.frame_samples * 2
+        buffer = bytearray()
+        chunk_bytes = int(sample_rate * 0.02) * 2
+        for index in range(0, len(pcm), chunk_bytes):
+            piece = pcm[index : index + chunk_bytes]
+            resampled = piece
+            if wake._resampler is not None:
+                samples = np.frombuffer(piece, dtype=np.int16)
+                resampled = wake._resampler.resample_chunk(samples).tobytes()
+            buffer.extend(resampled)
+            while len(buffer) >= step:
+                frame = np.frombuffer(bytes(buffer[:step]), dtype=np.int16)
+                del buffer[:step]
+                scores.append(max(wake.scores(frame).values(), default=0.0))
+        array = np.array(scores) if scores else np.zeros(1)
+        results[model] = {
+            "peak": float(array.max()),
+            "median": float(np.median(array)),
+            "frames_over_half": float((array >= 0.5).sum()),
+        }
+    return results
+
+
 async def play(audio: AudioConfig, pcm: bytes) -> None:
     speaker = Speaker(sample_rate=audio.sample_rate, device_name=audio.output_device)
     async with speaker:

@@ -36,13 +36,18 @@ input_device = ""       # substring of the device name, empty = system default. 
 output_device = ""
 
 [audio.wake]
-# Needs the extra: uv sync --extra wakeword. Any listed trigger wakes Pot, and extra models cost
-# about 1 ms per 80 ms of audio each, so listing two is a cheap way to be heard more reliably.
+# Needs the extra: uv sync --extra wakeword. Runs entirely on the machine, and nothing is uploaded
+# at runtime; the stock models are fetched once, about 1 MB each.
 #
-# The stock models differ a lot. Across three voices at three volumes, hey_mycroft fired 9/9
-# (median 1.000) and alexa 9/9 (0.931), but hey_jarvis only 6/9 and scored 0.14 on one voice.
-# alexa is reliable but will also wake a real Echo in the room. hey_rhasspy is the fourth option.
-models = ["hey_mycroft"]
+# Stock triggers: hey_mycroft, alexa, hey_jarvis, hey_rhasspy. They're trained on synthetic speech
+# and differ a lot on real voices: measured across three voices at three volumes, hey_mycroft
+# fired 9/9 (median 1.000), alexa 9/9 (0.931), hey_jarvis only 6/9 with 0.14 on one voice.
+# `pot audio benchmark` measures them against your voice, which is the comparison that counts.
+#
+# Any listed trigger wakes Pot, and each costs about 1 ms per 80 ms of audio, so listing two is a
+# cheap way to be heard more often. A path ending .onnx is a model you trained yourself, which is
+# the real fix if none of the stock ones hear you: see docs/custom-wake-word.md.
+models = []                     # empty = hey_mycroft
 threshold = 0.5                 # lower catches more and misfires more; tune with `pot audio wake`
 preroll_seconds = 1.0           # replayed on wake so the start of your request isn't clipped
 conversation_idle_seconds = 15  # quiet for this long and Pot goes back to waiting for the word
