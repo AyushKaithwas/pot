@@ -12,7 +12,7 @@ import contextlib
 import logging
 import sys
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from agents.realtime import RealtimeRunner, RealtimeSession
 
@@ -34,17 +34,28 @@ from pot.voice.conversation import ConversationWindow
 
 log = logging.getLogger(__name__)
 
-ANNOUNCE_PREAMBLE = "System notice, say this to the user now, briefly and in your own words:"
+# Announcements are mostly things to say, but an alarm can carry something to do ("play Wavy when
+# it goes off"), and that only works if the model is told it's allowed to act on one.
+ANNOUNCE_PREAMBLE = (
+    "System notice. If it asks you to do something, do it now with your tools. "
+    "Then tell the user, briefly and in your own words:"
+)
 
 
 class Announcer:
     """Bridges the runtime's sync announce callback onto the session's async send_message."""
 
-    def __init__(self, session: RealtimeSession) -> None:
+    def __init__(self, session: RealtimeSession, window: ConversationWindow | None = None) -> None:
         self._session = session
+        self._window = window
         self._pending: set[asyncio.Task] = set()
 
     def __call__(self, text: str) -> None:
+        if self._window is not None:
+            # Pot started this exchange, so it listens for the answer. Without this the mic stays
+            # shut after an announcement and the only way back in is the wake word, which is
+            # exactly what an announcement like "now playing" has just made hard to hear.
+            self._window.start()
         task = asyncio.create_task(self._session.send_message(f"{ANNOUNCE_PREAMBLE} {text}"))
         self._pending.add(task)
         task.add_done_callback(self._finished)
@@ -79,6 +90,7 @@ async def run_voice(settings: Settings) -> None:
         sample_rate=audio_config.sample_rate,
         volume=audio_config.cue_volume,
         enabled=audio_config.cues,
+        mute=gate.mute_for,
     )
     wake = _build_wake_word(settings)
     window = ConversationWindow(audio_config.wake.conversation_idle_seconds)
@@ -88,6 +100,8 @@ async def run_voice(settings: Settings) -> None:
     # Alarms need to make noise without the model being involved, so the ringer goes on the
     # runtime for the time skill to pick up when it starts.
     runtime.ringer = Ringer(speaker, sample_rate=audio_config.sample_rate)
+    runtime.speaker = speaker
+    runtime.on_ring(_listen_while_ringing(gate, runtime, wake, window))
 
     console.print(
         f"[bold]{settings.assistant.name}[/bold] ready. Skills: {', '.join(skill.name for skill in skills)}"
@@ -99,7 +113,7 @@ async def run_voice(settings: Settings) -> None:
     # so hand it to the model rather than letting it look itself up.
     session = await runner.run(model_config={"api_key": settings.openai_api_key})
     async with session, speaker, microphone:
-        runtime.on_announce(Announcer(session))
+        runtime.on_announce(Announcer(session, window))
         await _start_skill_services(runtime, skills)
         tasks = [
             asyncio.create_task(
@@ -123,8 +137,8 @@ async def run_voice(settings: Settings) -> None:
     runtime.on_announce(None)
     if speaker.underruns:
         console.print(
-            f"[yellow]{speaker.underruns} playback underrun(s)[/yellow] — that's audible as "
-            "clicks or rasp. Try a larger [audio] sample_rate, or check CPU load."
+            f"[yellow]{speaker.underruns} playback underrun(s)[/yellow] — audio arrived later "
+            "than it was needed, heard as a click mid-word. Check the network and CPU load."
         )
     console.print(runtime.usage.summary())
     await runtime.close()
@@ -208,7 +222,8 @@ async def _pump_microphone(
             # hearing now. Pulled rather than pushed, because writes run ahead of playback.
             echo.playback(speaker.drain_reference())
         if gate.is_open:
-            await session.send_audio(chunk)
+            if not gate.is_muted:
+                await session.send_audio(chunk)
             continue
         if recent is None:
             continue
@@ -280,6 +295,14 @@ async def _pump_events(
                 runtime.set_speaking(True)
                 speaker.write(event.audio.data)
             elif event.type == "audio_end":
+                speaker.finish()
+                # A skill can ask for the exchange to end, e.g. once music is playing. Applied here
+                # rather than when it was asked for, so Pot still finishes the sentence it's on.
+                if runtime.take_conversation_end() and window is not None:
+                    window.stop()
+                    ended_by_skill = wake is not None
+                else:
+                    ended_by_skill = False
                 reopen = asyncio.create_task(
                     _finish_speaking(
                         speaker,
@@ -287,9 +310,8 @@ async def _pump_events(
                         runtime,
                         activity,
                         cues,
-                        # With a wake word the gate is already open for the conversation, and the
-                        # model's idle timeout closes it; nothing to reopen here.
-                        reopen_mic=not hands_free and wake is None and audio.auto_reopen,
+                        reopen_mic=_should_reopen(audio, wake, window),
+                        closed_reason=f'say "{wake.spoken}" again' if ended_by_skill and wake else "",
                     ),
                     name="finish-speaking",
                 )
@@ -314,6 +336,11 @@ async def _pump_events(
             ):
                 _stop_listening(gate, runtime, cues, f'back to "{wake.model_name}"')
             elif event.type == "error":
+                if _is_expected_overlap(event.error):
+                    # Talking over a long tool call is a feature, and the API rejecting the extra
+                    # turn is how it declines to answer twice at once. Nothing broke.
+                    log.debug("overlapping turn declined: %s", event.error)
+                    continue
                 # Nothing to read on a screenless device, so the buzz is the whole message.
                 console.print(f"[red]error[/red] {event.error}")
                 cues.error()
@@ -325,6 +352,15 @@ async def _pump_events(
                 task.cancel()
         await asyncio.gather(*(t for t in (ticker, watcher) if t is not None), return_exceptions=True)
         activity.stop()
+
+
+def _is_expected_overlap(error: object) -> bool:
+    """Whether an error is just the API refusing to start a second reply while one is running.
+
+    Async tool calls exist so you can keep talking while Pot works, so a turn landing mid-reply is
+    normal. Showing it as an error, on a device whose only error channel is a buzz, would cry wolf.
+    """
+    return "conversation_already_has_active_response" in str(error)
 
 
 def _record_usage(event: object, runtime: Runtime) -> None:
@@ -343,6 +379,11 @@ async def _close_when_idle(
     """Stop streaming once the exchange has gone quiet, and wait for the wake word again."""
     while True:
         await asyncio.sleep(0.5)
+        if runtime.alarm_ringing:
+            # A ringing alarm is the one time silence doesn't mean the exchange is over: the mic
+            # has to stay open, or "stop" has nowhere to land and the noise can't be called off.
+            window.touch()
+            continue
         if not window.expired():
             continue
         window.stop()
@@ -358,6 +399,46 @@ async def _tick_while_working(activity: ToolActivity, cues: Cues) -> None:
             cues.working()
 
 
+def _listen_while_ringing(
+    gate: MicrophoneGate,
+    runtime: Runtime,
+    wake: WakeWord | None,
+    window: ConversationWindow,
+) -> Callable[[bool], None]:
+    """Open the mic for as long as an alarm is ringing.
+
+    Otherwise the one moment you most need to be heard is the one moment Pot isn't listening: on a
+    device with no screen and no buttons, an alarm you can't say "stop" to has to be waited out.
+    """
+
+    def ringing_changed(ringing: bool) -> None:
+        if not ringing:
+            return
+        if wake is not None:
+            wake.reset()
+        window.start()
+        gate.open()
+        runtime.set_listening(True)
+        console.print("[green]listening[/green] · say stop or snooze")
+
+    return ringing_changed
+
+
+def _should_reopen(audio: AudioConfig, wake: WakeWord | None, window: ConversationWindow | None) -> bool:
+    """Whether the mic should come back on now that Pot has finished a reply.
+
+    The gate is shut while Pot talks so it doesn't hear itself, which means every reply ends with
+    the mic closed. With a wake word it has to reopen for as long as the conversation is still
+    running, or a follow-up would need the word again, which is the opposite of what the window
+    is for. Hands-free never closes the gate in the first place, so there is nothing to reopen.
+    """
+    if audio.mode == "always_on" or not audio.auto_reopen:
+        return False
+    if wake is None:
+        return True
+    return window is not None and window.open
+
+
 async def _finish_speaking(
     speaker: Speaker,
     gate: MicrophoneGate,
@@ -366,6 +447,7 @@ async def _finish_speaking(
     cues: Cues | None = None,
     *,
     reopen_mic: bool,
+    closed_reason: str = "",
     settle_seconds: float = 0.2,
     timeout: float = 30.0,
 ) -> None:
@@ -382,6 +464,10 @@ async def _finish_speaking(
     await asyncio.sleep(settle_seconds)
     runtime.set_speaking(False)
     if not reopen_mic:
+        if closed_reason and cues is not None:
+            # Say so: on a screenless device, going quiet without a sound is indistinguishable
+            # from having broken.
+            _stop_listening(gate, runtime, cues, closed_reason)
         return
     gate.open()
     if cues is not None:

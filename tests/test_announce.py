@@ -6,6 +6,7 @@ import asyncio
 
 from pot.config import Settings
 from pot.runtime import Runtime
+from pot.voice.conversation import ConversationWindow
 from pot.voice.session import ANNOUNCE_PREAMBLE, Announcer
 
 
@@ -55,3 +56,24 @@ async def test_scheduled_job_announces_through_the_session():
 def test_announce_falls_back_to_printing(capsys):
     Runtime(Settings()).announce("no session here")
     assert "no session here" in capsys.readouterr().out
+
+
+async def test_an_announcement_opens_the_conversation():
+    """Pot started this exchange, so it has to listen for the answer.
+
+    The bug: after "now playing", the mic stayed shut and the only way back in was the wake word,
+    which music has just drowned out.
+    """
+    window = ConversationWindow(15)
+    session = FakeSession()
+    Announcer(session, window)("Now playing Without Me.")
+    await asyncio.sleep(0)
+
+    assert window.open, "otherwise the reply reopens nothing and you can't say 'stop'"
+
+
+async def test_an_announcement_without_a_window_still_speaks():
+    session = FakeSession()
+    Announcer(session)("The pasta timer is up.")
+    await asyncio.sleep(0)
+    assert session.messages

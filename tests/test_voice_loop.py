@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 
 from pot.audio.capture import MicrophoneGate
-from pot.config import Settings
+from pot.config import AudioConfig, Settings
 from pot.runtime import Runtime
 from pot.voice.activity import ToolActivity
-from pot.voice.session import _finish_speaking
+from pot.voice.conversation import ConversationWindow
+from pot.voice.session import _finish_speaking, _listen_while_ringing, _should_reopen
 
 
 class FakeSpeaker:
@@ -140,3 +141,112 @@ def test_a_failing_listener_does_not_break_the_broadcast():
     runtime.on_speech(seen.append)
     runtime.set_speaking(True)
     assert seen == [True]
+
+
+class FakeWake:
+    """Only its presence matters to the decision, not its behaviour."""
+
+
+def _audio(**overrides) -> AudioConfig:
+    return AudioConfig(**overrides)
+
+
+def test_a_follow_up_does_not_need_the_wake_word_again():
+    """The bug this catches: Pot answering, then ignoring you until you say the word again."""
+    window = ConversationWindow(15)
+    window.start()
+    assert _should_reopen(_audio(mode="wake_word"), FakeWake(), window)
+
+
+def test_the_wake_word_is_needed_again_once_the_conversation_has_timed_out():
+    assert not _should_reopen(_audio(mode="wake_word"), FakeWake(), ConversationWindow(15))
+
+
+def test_push_to_talk_reopens_as_before():
+    assert _should_reopen(_audio(mode="push_to_talk"), None, None)
+
+
+def test_hands_free_has_nothing_to_reopen():
+    assert not _should_reopen(_audio(mode="always_on"), None, None)
+
+
+def test_auto_reopen_off_is_still_respected():
+    window = ConversationWindow(15)
+    window.start()
+    assert not _should_reopen(_audio(mode="wake_word", auto_reopen=False), FakeWake(), window)
+
+
+class FakeCues:
+    def __init__(self) -> None:
+        self.closed_played = False
+        self.ready_played = False
+
+    def closed(self) -> None:
+        self.closed_played = True
+
+    def ready(self) -> None:
+        self.ready_played = True
+
+
+class FakeGate:
+    def __init__(self) -> None:
+        self.opened = False
+
+    def open(self) -> None:
+        self.opened = True
+
+
+def test_a_ringing_alarm_opens_the_mic():
+    """Otherwise the one moment you need to be heard is the one moment Pot isn't listening."""
+    gate, runtime, window = FakeGate(), Runtime(Settings()), ConversationWindow(15)
+    _listen_while_ringing(gate, runtime, None, window)(True)
+
+    assert gate.opened, "there is no screen and no button, so 'stop' is the only way out"
+    assert window.open, "and the window has to be open or it shuts again in 15 seconds"
+    assert runtime.listening
+
+
+def test_the_end_of_a_ring_does_not_slam_the_mic_shut():
+    """Stopping the alarm is usually mid-sentence; the rest of it still has to be heard."""
+    gate, runtime, window = FakeGate(), Runtime(Settings()), ConversationWindow(15)
+    listener = _listen_while_ringing(gate, runtime, None, window)
+    listener(True)
+    listener(False)
+    assert window.open
+
+
+def test_a_skill_can_ask_for_the_conversation_to_end():
+    runtime = Runtime(Settings())
+    assert not runtime.take_conversation_end(), "nothing asked, so nothing to do"
+
+    runtime.end_conversation()
+    assert runtime.take_conversation_end()
+    assert not runtime.take_conversation_end(), "one request, honoured once"
+
+
+async def test_ending_the_conversation_says_so_out_loud():
+    """Going quiet with no sound is indistinguishable from having crashed, with no screen."""
+    gate = MicrophoneGate(open_at_start=True)
+    cues = FakeCues()
+    await _finish_speaking(
+        FakeSpeaker(),
+        gate,
+        Runtime(Settings()),
+        None,
+        cues,
+        reopen_mic=False,
+        closed_reason='say "hey mycroft" again',
+        settle_seconds=0.01,
+    )
+    assert not gate.is_open
+    assert cues.closed_played, "the earcon is the only way to hear the state change"
+
+
+async def test_a_reply_that_keeps_listening_says_nothing_extra():
+    gate = MicrophoneGate()
+    cues = FakeCues()
+    await _finish_speaking(
+        FakeSpeaker(), gate, Runtime(Settings()), None, cues, reopen_mic=True, settle_seconds=0.01
+    )
+    assert gate.is_open
+    assert not cues.closed_played

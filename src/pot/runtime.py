@@ -35,11 +35,16 @@ class Runtime:
     _speech_listeners: list[Callable[[bool], None]] = field(default_factory=list, repr=False)
     _listen_listeners: list[Callable[[bool], None]] = field(default_factory=list, repr=False)
     _ring_listeners: list[Callable[[bool], None]] = field(default_factory=list, repr=False)
+    # Set by a skill that has just started something long-running, so the session stops listening
+    # after this reply rather than waiting out the idle timeout.
+    _end_conversation: bool = False
     _speaking: bool = False
     _listening: bool = False
     _ringing: bool = False
-    # The session owns the speaker, so it parks the ringer here for the time skill to use.
+    # The session owns the speaker, so it parks these here for skills that need them: the time
+    # skill rings through it, and music is mixed through it so Pot can hear over its own playback.
     ringer: Any | None = None
+    speaker: Any | None = None
 
     @property
     def usage(self) -> UsageMeter:
@@ -73,6 +78,20 @@ class Runtime:
     def on_ring(self, callback: Callable[[bool], None]) -> None:
         """Subscribe to "an alarm is ringing". Music ducks for this too."""
         self._ring_listeners.append(callback)
+
+    def end_conversation(self) -> None:
+        """Ask for the exchange to end once Pot has finished this reply.
+
+        For skills that leave something running. Starting a track is usually the end of what the
+        user wanted, so holding the mic open afterwards streams the room to a paid API for no
+        reason. Say the wake word again, the way an Echo works.
+        """
+        self._end_conversation = True
+
+    def take_conversation_end(self) -> bool:
+        """Whether the conversation was asked to end, clearing the request."""
+        ended, self._end_conversation = self._end_conversation, False
+        return ended
 
     def set_speaking(self, speaking: bool) -> None:
         self._publish(self._speech_listeners, "_speaking", speaking)
