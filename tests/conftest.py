@@ -1,9 +1,21 @@
 from __future__ import annotations
 
-import pytest
+import os
+import tempfile
 
-from pot.config import LightDevice, LightsConfig, Settings
-from pot.runtime import Runtime, set_runtime
+# Point config, secrets and state at a throwaway directory before anything reads them. Settings
+# resolves its env file when the class is defined, so this has to happen before that import: a
+# test run that picks up a real ~/.config/pot/env behaves differently on every machine, and puts
+# somebody's API key into pytest's failure output.
+_SANDBOX = tempfile.mkdtemp(prefix="pot-tests-")
+os.environ["POT_CONFIG"] = f"{_SANDBOX}/pot.toml"
+os.environ["POT_ENV"] = f"{_SANDBOX}/env"
+os.environ["POT_STATE_DIR"] = f"{_SANDBOX}/state"
+
+import pytest  # noqa: E402
+
+from pot.config import LightDevice, LightsConfig, Settings  # noqa: E402
+from pot.runtime import Runtime, set_runtime  # noqa: E402
 
 
 @pytest.fixture
