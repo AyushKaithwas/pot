@@ -80,6 +80,10 @@ class LightService:
         return list(found.values())
 
     async def apply(self, devices: list[LightDevice], change: LightChange) -> list[Outcome]:
+        # Normalise here rather than at each caller: a change that reaches a bulb unresolved asks
+        # for a state the bulb can't hold, and the CLI and scenes deserve the same handling the
+        # model's tool gets. Resolving twice is a no-op, so callers wanting the note may still ask.
+        change, _ = change.resolved()
         return await self._gather(devices, lambda d: self.chain.apply(d, change))
 
     async def read(self, devices: list[LightDevice]) -> list[Outcome]:

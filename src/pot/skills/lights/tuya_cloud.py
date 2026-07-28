@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 
 import tinytuya
 
@@ -21,6 +22,8 @@ SWITCH_CODES = ("switch_led", "switch_led_1", "led_switch")
 BRIGHTNESS_CODES = ("bright_value_v2", "bright_value", "bright_value_1")
 TEMP_CODES = ("temp_value_v2", "temp_value")
 CODE_MAX = 1000
+# How long to give the cloud's status to catch up with a command before trusting the command.
+SETTLE_SECONDS = 0.6
 
 
 class TuyaCloudProvider:
@@ -64,10 +67,28 @@ class TuyaCloudProvider:
         if change.color:
             raise LightError("colour changes are only supported over the local connection")
 
-        if commands:
-            result = await asyncio.to_thread(self._client().sendcommand, device.gwid, {"commands": commands})
-            _check(result)
-        return await self.read(device)
+        if not commands:
+            return await self.read(device)
+        result = await asyncio.to_thread(self._client().sendcommand, device.gwid, {"commands": commands})
+        _check(result)
+        return await self._settled(device, change)
+
+    async def _settled(self, device: LightDevice, change: LightChange) -> LightState:
+        """The state after a command, given a status that can lag a moment behind it.
+
+        Read once, and if the status still shows the old values give it one more chance before
+        falling back to what we sent. Confirming from the device is worth a short wait: reporting
+        the request as fact is the one way to tell the user a change happened when it didn't.
+        """
+        state = await self.read(device)
+        if _agrees(state, change):
+            return state
+        await asyncio.sleep(SETTLE_SECONDS)
+        state = await self.read(device)
+        if _agrees(state, change):
+            return state
+        log.debug("cloud status still lagging for %s, reporting what was sent", device.id)
+        return _confirmed(state, change)
 
     async def read(self, device: LightDevice) -> LightState:
         result = await asyncio.to_thread(self._client().getstatus, device.gwid)
@@ -95,6 +116,29 @@ class TuyaCloudProvider:
                 item["code"] for item in payload if isinstance(item, dict) and "code" in item
             }
         return self._codes_seen[device.gwid]
+
+
+def _agrees(state: LightState, change: LightChange) -> bool:
+    """Whether the status already reflects everything we asked for."""
+    wanted = (change.power, change.brightness_pct, change.color_temp_pct)
+    got = (state.power, state.brightness_pct, state.color_temp_pct)
+    return all(asked is None or asked == actual for asked, actual in zip(wanted, got, strict=True))
+
+
+def _confirmed(state: LightState, change: LightChange) -> LightState:
+    """What the light is now, trusting what we just told it over a status that lags behind it.
+
+    Tuya's cloud status is eventually consistent: read straight after a command it still returns
+    the old values, so reporting it verbatim says "on at 1 percent" immediately after setting 100,
+    and Pot reads that back as if it were true. The command was accepted, so the values we sent are
+    the better answer; anything we didn't set still comes from the device.
+    """
+    return replace(
+        state,
+        power=state.power if change.power is None else change.power,
+        brightness_pct=(state.brightness_pct if change.brightness_pct is None else change.brightness_pct),
+        color_temp_pct=(state.color_temp_pct if change.color_temp_pct is None else change.color_temp_pct),
+    )
 
 
 def _pick(candidates: tuple[str, ...], available: set[str]) -> str:

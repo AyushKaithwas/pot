@@ -17,10 +17,13 @@ PROMPT = """
 Lights: you can switch them, dim them, shift them warm or cool, and set colours.
 - Batch everything you can into a single set_lights call: it accepts several targets and
   several attributes at once, and `after_seconds` defers the whole change.
-- brightness_pct and color_temp_pct are 0-100. color_temp_pct 0 is warmest, 100 is coolest.
+- brightness_pct is 1-100 and color_temp_pct is 0-100, where 0 is warmest and 100 coolest. There
+  is nothing above 100: "full brightness" is 100. Use power off rather than a brightness of 0.
 - A light shows either a colour or a white temperature, never both. Send `color` with
   `brightness_pct` to dim a colour; don't send `color_temp_pct` alongside a colour.
 - `color` is a 6-digit hex value, so translate spoken colours yourself ("red" -> ff0000).
+- "White" is not a colour on these lights, it's the white scale: send color_temp_pct, not
+  color=ffffff. Plain white is color_temp_pct=50, warm white low, cool white high.
 - The tool reports the state the light is actually in afterwards. Trust it over your own
   expectation, and don't claim a change the result doesn't show.
 - Never ask which light when only one is configured; just act.
