@@ -96,7 +96,10 @@ class WakeConfig(BaseModel):
     threshold: float = Field(default=0.5, ge=0.05, le=0.99)
     # Detection lands a few hundred ms after the word finishes, by which point you're already
     # saying the request. Replaying this much recent audio stops the first syllables being lost.
-    preroll_seconds: float = Field(default=1.0, ge=0.0, le=3.0)
+    # Detection completes as the wake word ends, so this only has to cover the detector being a
+    # fraction late. Any longer and it replays the wake word itself, which then gets transcribed
+    # as a turn of its own and answered ("Mycroft." -> "Your MacBook Pro is available").
+    preroll_seconds: float = Field(default=0.2, ge=0.0, le=3.0)
     # How long you can stay quiet before Pot stops listening and waits for the word again.
     # Timed locally: the API rejects turn_detection.idle_timeout_ms.
     conversation_idle_seconds: int = Field(default=15, ge=2, le=120)
@@ -122,9 +125,10 @@ class AudioConfig(BaseModel):
     # screen, so they stay on by default.
     cues: bool = True
     cue_volume: float = 0.2
-    # Subtract Pot's own playback from what the wake word detector hears, using the audio we sent
-    # to the speaker as the reference. Only affects the detector's copy, never what Pot sends to
-    # the model. Cannot touch music from another app: that has no reference (see the README).
+    # Subtract Pot's own playback from what the wake word detector hears, using what actually left
+    # the speaker as the reference. Only affects the detector's copy, never what Pot sends to the
+    # model. This covers music too, as long as it's playing through Pot's own Spotify speaker;
+    # music from another app or device has no reference and can't be removed.
     echo_suppression: bool = True
     sample_rate: int = 24000
     input_device: str = ""
@@ -171,9 +175,7 @@ class SpeakerConfig(BaseModel):
     enabled: bool = False
     name: str = "Pot"
     binary: str = "librespot"
-    backend: str = "rodio"  # rodio works on macOS; use alsa on the Pi
     bitrate: int = 160
-    device: str = ""  # backend-specific output device, empty means default
 
     def cache_path(self) -> Path:
         return state_dir() / "librespot"

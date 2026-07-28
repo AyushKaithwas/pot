@@ -53,7 +53,9 @@ output_device = ""
 # the real fix if none of the stock ones hear you: see docs/custom-wake-word.md.
 models = []                     # empty = hey_mycroft
 threshold = 0.5                 # lower catches more and misfires more; tune with `pot audio wake`
-preroll_seconds = 1.0           # replayed on wake so the start of your request isn't clipped
+preroll_seconds = 0.2           # replayed on wake, in case detection lands a fraction late.
+                                # Raise it if the first word of a request gets clipped; much
+                                # higher and the wake word itself is sent and answered.
 conversation_idle_seconds = 15  # quiet for this long and Pot goes back to waiting for the word
 
 [skills]
@@ -82,12 +84,16 @@ redirect_port = 8765
 [music.speaker]
 # Makes Pot itself a Spotify Connect speaker, the way an Echo is one. Needs librespot installed
 # and a Premium account. Off by default: it's an unofficial Spotify client.
+#
+# Turn this on if you want Pot to hear you over music. Its audio is mixed through Pot rather than
+# going to the sound card directly, which is what lets echo suppression subtract the music from
+# what the microphone hears. Music played on any other device can't be removed, so Pot competes
+# with it and usually loses. Nothing to configure per platform: the pipe is the same on a Mac and
+# on a Pi.
 enabled = false
-name = "Pot"
+name = "Pot"              # what to pick in Spotify's device list
 binary = "librespot"
-backend = "rodio"         # rodio on macOS, alsa on a Raspberry Pi
 bitrate = 160
-device = ""               # backend-specific output device, empty = system default
 
 # Lights are yours to declare, in ~/.config/pot/pot.toml. Find the gwid with `pot lights scan`:
 #

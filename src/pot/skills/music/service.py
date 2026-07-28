@@ -18,9 +18,15 @@ log = logging.getLogger(__name__)
 
 
 class MusicService:
-    def __init__(self, settings: Settings, provider: MusicProvider | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        provider: MusicProvider | None = None,
+        *,
+        output: object | None = None,
+    ) -> None:
         self.settings = settings
-        self.provider = provider or _build_provider(settings)
+        self.provider = provider or _build_provider(settings, output)
         self._ducked_from: int | None = None
         self._duck_lock = asyncio.Lock()
 
@@ -31,19 +37,60 @@ class MusicService:
         speaker = None
         if speaker_name:
             speaker = self.provider.resolve(await self.speakers(), speaker_name)
-        return await self.provider.play(query, kind, speaker)
+        return self._playing(await self.provider.play(query, kind, speaker))
 
     async def pause(self) -> str:
         return await self.provider.pause()
 
     async def resume(self) -> str:
-        return await self.provider.resume()
+        return self._playing(await self.provider.resume())
 
     async def skip(self, backwards: bool = False) -> str:
-        return await self.provider.skip(backwards)
+        return self._playing(await self.provider.skip(backwards))
+
+    def _playing(self, spoken: str) -> str:
+        """Music is running now, so the exchange is over unless the user starts another one.
+
+        Getting a track going is usually all that was wanted, and an Echo goes back to its wake
+        word here too. Pausing and volume are left alone: those tend to come in runs.
+        """
+        try:
+            runtime().end_conversation()
+        except Exception:
+            # No runtime outside a session, e.g. `pot music play` from the shell.
+            log.debug("no runtime to end the conversation on", exc_info=True)
+        return spoken
 
     async def now_playing(self) -> str:
         return await self.provider.now_playing()
+
+    async def seek(self, seconds: int, relative: bool = True) -> str:
+        return await self.provider.seek(seconds, relative)
+
+    async def set_shuffle(self, on: bool) -> str:
+        return await self.provider.set_shuffle(on)
+
+    async def set_repeat(self, mode: str) -> str:
+        return await self.provider.set_repeat(mode)
+
+    async def queue(self, query: str, kind: str = "track") -> str:
+        return await self.provider.queue(query, kind)
+
+    async def upcoming(self) -> str:
+        return await self.provider.upcoming()
+
+    async def recent(self) -> str:
+        return await self.provider.recent()
+
+    async def save_current(self, remove: bool = False) -> str:
+        return await self.provider.save_current(remove)
+
+    async def add_current_to_playlist(self, playlist: str) -> str:
+        return await self.provider.add_current_to_playlist(playlist)
+
+    async def move(self, speaker_name: str) -> str:
+        speaker = self.provider.resolve(await self.speakers(), speaker_name)
+        return self._playing(await self.provider.move(speaker))
 
     async def set_volume(self, percent: int) -> str:
         percent = max(0, min(100, percent))
@@ -94,13 +141,21 @@ def get_service() -> MusicService:
 
 
 def _create(rt: Runtime) -> MusicService:
-    service = MusicService(rt.settings)
+    service = MusicService(rt.settings, output=rt.speaker)
     # Music ducks while Pot talks, while Pot listens for a request, and while an alarm rings; the
     # session broadcasts all three and skills subscribe, so core never imports a skill.
     reasons: set[str] = set()
-    rt.on_speech(lambda active: _set_quiet(service, reasons, "speaking", active))
-    rt.on_listen(lambda active: _set_quiet(service, reasons, "listening", active))
-    rt.on_ring(lambda active: _set_quiet(service, reasons, "ringing", active))
+
+    def quiet(reason: str, active: bool) -> None:
+        _set_quiet(service, reasons, reason, active)
+        if rt.speaker is not None:
+            # Music mixed through Pot ducks with a gain change rather than a Spotify round trip:
+            # it takes effect on the next audio block and can't fail on the network.
+            rt.speaker.duck_music(bool(reasons))
+
+    rt.on_speech(lambda active: quiet("speaking", active))
+    rt.on_listen(lambda active: quiet("listening", active))
+    rt.on_ring(lambda active: quiet("ringing", active))
     return service
 
 
@@ -122,7 +177,7 @@ def _spawn(coroutine) -> None:
 _pending: set[asyncio.Task] = set()
 
 
-def _build_provider(settings: Settings) -> MusicProvider:
+def _build_provider(settings: Settings, output: object | None = None) -> MusicProvider:
     if settings.music.provider != "spotify":
         raise MusicUnavailable(f"unknown music provider {settings.music.provider!r}")
-    return SpotifyProvider(settings)
+    return SpotifyProvider(settings, output=output)

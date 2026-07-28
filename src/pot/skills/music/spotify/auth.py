@@ -29,12 +29,19 @@ log = logging.getLogger(__name__)
 
 AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
+# Adding to this list invalidates existing logins in practice: a token issued under the old set
+# comes back "Insufficient client scope" for anything new, so `pot music login` has to run again.
 SCOPES = (
     "user-read-playback-state",
     "user-modify-playback-state",
     "user-read-currently-playing",
     "user-read-private",
+    "user-read-recently-played",
+    "user-library-read",
+    "user-library-modify",
     "playlist-read-private",
+    "playlist-modify-private",
+    "playlist-modify-public",
 )
 # Refresh a little early: a token that expires mid-request just becomes a confusing 401.
 EXPIRY_MARGIN_SECONDS = 60

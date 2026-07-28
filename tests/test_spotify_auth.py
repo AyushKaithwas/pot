@@ -131,3 +131,19 @@ def test_logout_forgets_the_token(tmp_path):
     auth.logout()
     assert not keeper.path.exists()
     assert auth.logged_in is False
+
+
+@pytest.mark.parametrize(
+    ("capability", "scope"),
+    [
+        ("seeking, shuffle, repeat and queueing", "user-modify-playback-state"),
+        ("reading the position and the queue", "user-read-playback-state"),
+        ("what played earlier", "user-read-recently-played"),
+        ("saving and unsaving a song", "user-library-modify"),
+        ("finding the user's own playlists", "playlist-read-private"),
+        ("adding to a playlist", "playlist-modify-private"),
+    ],
+)
+def test_each_capability_asks_for_the_scope_it_needs(capability: str, scope: str):
+    """A missing scope isn't a startup error, it's "Insufficient client scope" at the moment of use."""
+    assert scope in SCOPES, capability

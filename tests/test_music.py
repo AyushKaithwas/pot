@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import httpx
 import pytest
 
 from pot.config import MusicConfig, Settings, SpeakerConfig, SpotifyConfig
+from pot.runtime import Runtime, set_runtime
 from pot.skills.music.provider import MusicError, MusicUnavailable
 from pot.skills.music.service import MusicService
 from pot.skills.music.spotify.auth import SpotifyAuth, Token, TokenStore
@@ -325,3 +327,263 @@ async def test_ducking_survives_a_provider_that_cannot_report_volume():
     await service.duck()
     await service.unduck()
     assert provider.volumes == []
+
+
+class PlayingProvider:
+    """Enough of a provider to see what the service does around it."""
+
+    name = "fake"
+
+    async def play(self, query, kind, speaker):
+        return f"playing {query}"
+
+    async def pause(self):
+        return "paused"
+
+    async def resume(self):
+        return "resumed"
+
+    async def skip(self, backwards=False):
+        return "skipped"
+
+    async def close(self):
+        return None
+
+
+async def test_starting_a_track_ends_the_exchange():
+    """An Echo goes back to its wake word here, and a follow-up after "play X" is rare."""
+    rt = Runtime(Settings())
+    set_runtime(rt)
+    service = MusicService(Settings(), PlayingProvider())
+
+    assert await service.play("Not Afraid") == "playing Not Afraid"
+    assert rt.take_conversation_end(), "otherwise the mic stays open for the whole track"
+
+
+async def test_resuming_and_skipping_end_it_too():
+    for action in ("resume", "skip"):
+        rt = Runtime(Settings())
+        set_runtime(rt)
+        service = MusicService(Settings(), PlayingProvider())
+        await getattr(service, action)()
+        assert rt.take_conversation_end(), f"{action} leaves music playing as well"
+
+
+async def test_pausing_keeps_listening():
+    """ "Pause", "actually skip it", "volume down" come in runs, so don't shut the mic between them."""
+    rt = Runtime(Settings())
+    set_runtime(rt)
+    service = MusicService(Settings(), PlayingProvider())
+
+    await service.pause()
+    assert not rt.take_conversation_end()
+
+
+async def test_playing_outside_a_session_does_not_crash():
+    """`pot music play` from the shell has no session and no mic to close."""
+    set_runtime(None)
+    service = MusicService(Settings(), PlayingProvider())
+    assert await service.play("anything") == "playing anything"
+
+
+NOW_PLAYING = {
+    "is_playing": True,
+    "progress_ms": 64_000,
+    "shuffle_state": True,
+    "repeat_state": "track",
+    "item": {
+        "name": "Brown Eyed Girl",
+        "uri": "spotify:track:abc",
+        "duration_ms": 232_000,
+        "artists": [{"name": "Van Morrison"}],
+    },
+    "device": {"name": "Pot", "volume_percent": 65},
+}
+
+
+def rich_provider(tmp_path, extra=None):
+    """A provider whose player is mid-track, so seeking and saving have something to act on."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        path = request.url.path
+        for suffix, payload in (extra or {}).items():
+            if path.endswith(suffix):
+                return httpx.Response(200, json=payload)
+        if path.endswith("/me/player"):
+            return httpx.Response(200, json=NOW_PLAYING)
+        if path.endswith("/me/player/devices"):
+            return httpx.Response(200, json={"devices": [POT]})
+        if path.endswith("/search"):
+            return httpx.Response(
+                200, json={"tracks": {"items": [{"name": "Song", "uri": "spotify:track:z"}]}}
+            )
+        return httpx.Response(204)
+
+    client = SpotifyClient(auth_for(tmp_path), transport=httpx.MockTransport(handler))
+    provider = SpotifyProvider(settings(), client=client, speaker=FakeManagedSpeaker())
+    return provider, calls
+
+
+def sought(calls) -> int:
+    for request in calls:
+        if request.url.path.endswith("/me/player/seek"):
+            return int(request.url.params["position_ms"])
+    raise AssertionError("nothing was sought")
+
+
+async def test_seeking_forward_moves_from_the_current_position(tmp_path):
+    provider, calls = rich_provider(tmp_path)
+    spoken = await provider.seek(20)
+    assert sought(calls) == 84_000, "1:04 plus twenty seconds"
+    assert "1:24" in spoken
+
+
+async def test_seeking_backwards_never_goes_below_zero(tmp_path):
+    provider, calls = rich_provider(tmp_path)
+    await provider.seek(-600)
+    assert sought(calls) == 0
+
+
+async def test_seeking_from_the_start_is_absolute(tmp_path):
+    provider, calls = rich_provider(tmp_path)
+    await provider.seek(30, relative=False)
+    assert sought(calls) == 30_000
+
+
+async def test_seeking_past_the_end_stops_short_of_skipping(tmp_path):
+    """Spotify treats a seek past the end as a skip, which is rarely what "forward" meant."""
+    provider, calls = rich_provider(tmp_path)
+    await provider.seek(9999)
+    assert sought(calls) == 231_000
+
+
+async def test_now_playing_says_where_it_is_and_how_it_is_playing(tmp_path):
+    provider, _ = rich_provider(tmp_path)
+    spoken = await provider.now_playing()
+    assert "1:04 of 3:52" in spoken
+    assert "shuffled" in spoken
+    assert "repeating this track" in spoken
+
+
+async def test_repeat_only_accepts_modes_spotify_knows(tmp_path):
+    provider, _ = rich_provider(tmp_path)
+    assert "repeating this track" in await provider.set_repeat("track")
+    with pytest.raises(MusicError):
+        await provider.set_repeat("sometimes")
+
+
+async def test_queueing_does_not_start_playback(tmp_path):
+    provider, calls = rich_provider(tmp_path)
+    await provider.queue("Song")
+    assert any(r.url.path.endswith("/me/player/queue") for r in calls)
+    assert not any(r.url.path.endswith("/me/player/play") for r in calls), "queueing interrupts nothing"
+
+
+async def test_saving_uses_the_id_of_what_is_playing(tmp_path):
+    provider, calls = rich_provider(tmp_path)
+    spoken = await provider.save_current()
+    saved = next(r for r in calls if r.url.path.endswith("/me/tracks"))
+    assert saved.method == "PUT"
+    assert saved.url.params["ids"] == "abc"
+    assert "Brown Eyed Girl" in spoken
+
+
+async def test_unsaving_is_the_same_call_backwards(tmp_path):
+    provider, calls = rich_provider(tmp_path)
+    await provider.save_current(remove=True)
+    assert next(r for r in calls if r.url.path.endswith("/me/tracks")).method == "DELETE"
+
+
+async def test_a_playlist_is_matched_against_the_users_own(tmp_path):
+    """A public search won't find someone's private playlist, so match their own list loosely."""
+    provider, calls = rich_provider(
+        tmp_path,
+        {"/me/playlists": {"items": [{"name": "Morning Run", "uri": "spotify:playlist:pl1"}]}},
+    )
+    spoken = await provider.add_current_to_playlist("morning run")
+    assert any(r.url.path == "/v1/playlists/pl1/tracks" for r in calls)
+    assert "Morning Run" in spoken
+
+
+async def test_an_unknown_playlist_says_so(tmp_path):
+    provider, _ = rich_provider(tmp_path, {"/me/playlists": {"items": []}})
+    with pytest.raises(MusicError):
+        await provider.add_current_to_playlist("nonexistent")
+
+
+async def test_the_queue_and_recent_tracks_are_read_back(tmp_path):
+    provider, _ = rich_provider(
+        tmp_path,
+        {
+            "/me/player/queue": {"queue": [{"name": "Next One", "uri": "spotify:track:n", "type": "track"}]},
+            "/me/player/recently-played": {
+                "items": [{"track": {"name": "Earlier One", "uri": "spotify:track:e", "type": "track"}}]
+            },
+        },
+    )
+    assert "Next One" in await provider.upcoming()
+    assert "Earlier One" in await provider.recent()
+
+
+async def test_seeking_with_nothing_playing_says_so(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(204)
+
+    client = SpotifyClient(auth_for(tmp_path), transport=httpx.MockTransport(handler))
+    provider = SpotifyProvider(settings(), client=client, speaker=FakeManagedSpeaker())
+    with pytest.raises(MusicError):
+        await provider.seek(10)
+
+
+async def test_a_podcast_episode_plays_as_one_thing_not_a_context(tmp_path):
+    """Spotify plays a single episode through `uris`; sent as a context it just fails."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json={"episodes": {"items": [{"name": "Ep 1", "uri": "spotify:episode:e1"}]}},
+            )
+        if request.url.path.endswith("/me/player/devices"):
+            return httpx.Response(200, json={"devices": [POT]})
+        return httpx.Response(204)
+
+    client = SpotifyClient(auth_for(tmp_path), transport=httpx.MockTransport(handler))
+    provider = SpotifyProvider(settings(), client=client, speaker=FakeManagedSpeaker())
+    await provider.play("some podcast", "episode")
+
+    body = json.loads(next(r for r in calls if r.url.path.endswith("/me/player/play")).content)
+    assert body == {"uris": ["spotify:episode:e1"]}
+
+
+async def test_a_whole_show_plays_as_a_context(tmp_path):
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200, json={"shows": {"items": [{"name": "A Show", "uri": "spotify:show:s1"}]}}
+            )
+        if request.url.path.endswith("/me/player/devices"):
+            return httpx.Response(200, json={"devices": [POT]})
+        return httpx.Response(204)
+
+    client = SpotifyClient(auth_for(tmp_path), transport=httpx.MockTransport(handler))
+    provider = SpotifyProvider(settings(), client=client, speaker=FakeManagedSpeaker())
+    await provider.play("a show", "show")
+
+    body = json.loads(next(r for r in calls if r.url.path.endswith("/me/player/play")).content)
+    assert body == {"context_uri": "spotify:show:s1"}
+
+
+async def test_saving_something_already_saved_says_so_instead(tmp_path):
+    """Answering "saved it" when it was already there is a small lie worth not telling."""
+    provider, calls = rich_provider(tmp_path, {"/me/tracks/contains": [True]})
+    spoken = await provider.save_current()
+    assert "already" in spoken
+    assert not any(r.method == "PUT" and r.url.path.endswith("/me/tracks") for r in calls)

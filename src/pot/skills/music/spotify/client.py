@@ -19,7 +19,9 @@ from pot.skills.music.spotify.auth import SpotifyAuth
 log = logging.getLogger(__name__)
 
 API_BASE = "https://api.spotify.com/v1"
-SEARCH_KINDS = {"track", "album", "artist", "playlist"}
+# Podcasts are searched as episodes and shows, and play through the same player endpoints.
+SEARCH_KINDS = {"track", "album", "artist", "playlist", "episode", "show"}
+REPEAT_MODES = {"off", "track", "context"}
 
 
 class SpotifyError(RuntimeError):
@@ -56,11 +58,30 @@ class NowPlaying:
     is_playing: bool
     device_name: str | None = None
     volume_percent: int | None = None
+    position_ms: int | None = None
+    duration_ms: int | None = None
+    shuffle: bool = False
+    repeat: str = "off"
+    uri: str = ""
+
+    @property
+    def position(self) -> str:
+        """How far in, spoken as a clock, e.g. "1:04 of 3:52"."""
+        if self.position_ms is None or self.duration_ms is None:
+            return ""
+        return f"{clock(self.position_ms)} of {clock(self.duration_ms)}"
 
     def describe(self) -> str:
         verb = "playing" if self.is_playing else "paused"
         where = f" on {self.device_name}" if self.device_name else ""
-        return f"{verb}: {self.title} by {self.artists}{where}"
+        parts = [f"{verb}: {self.title} by {self.artists}{where}"]
+        if self.position:
+            parts.append(self.position)
+        if self.shuffle:
+            parts.append("shuffled")
+        if self.repeat != "off":
+            parts.append("repeating this track" if self.repeat == "track" else "repeating")
+        return ", ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -75,6 +96,15 @@ class Playable:
     @property
     def is_track(self) -> bool:
         return self.kind == "track"
+
+    @property
+    def plays_alone(self) -> bool:
+        """Whether this goes in `uris` rather than as a context.
+
+        A track or a single podcast episode is one thing to play; an album, artist, playlist or
+        whole show is a context that brings its own queue.
+        """
+        return self.kind in {"track", "episode"}
 
     def describe(self) -> str:
         return f"{self.name} by {self.artists}" if self.artists else self.name
@@ -104,6 +134,11 @@ class SpotifyClient:
             is_playing=bool(payload.get("is_playing")),
             device_name=device.get("name"),
             volume_percent=device.get("volume_percent"),
+            position_ms=payload.get("progress_ms"),
+            duration_ms=item.get("duration_ms"),
+            shuffle=bool(payload.get("shuffle_state")),
+            repeat=payload.get("repeat_state") or "off",
+            uri=item.get("uri", ""),
         )
 
     async def search(self, query: str, kind: str, limit: int = 1) -> list[Playable]:
@@ -128,8 +163,8 @@ class SpotifyClient:
         body: dict[str, Any] = {}
         if playables:
             first = playables[0]
-            if first.is_track:
-                body = {"uris": [p.uri for p in playables if p.is_track]}
+            if first.plays_alone:
+                body = {"uris": [p.uri for p in playables if p.plays_alone]}
             else:
                 body = {"context_uri": first.uri}
         await self._request("PUT", "/me/player/play", params=_device_param(device_id), json=body or None)
@@ -151,6 +186,62 @@ class SpotifyClient:
     async def transfer(self, device_id: str, *, play: bool = True) -> None:
         await self._request("PUT", "/me/player", json={"device_ids": [device_id], "play": play})
 
+    async def seek(self, position_ms: int, *, device_id: str | None = None) -> None:
+        params = {"position_ms": max(0, int(position_ms))}
+        params.update(_device_param(device_id))
+        await self._request("PUT", "/me/player/seek", params=params)
+
+    async def set_shuffle(self, on: bool, *, device_id: str | None = None) -> None:
+        params: dict[str, Any] = {"state": "true" if on else "false"}
+        params.update(_device_param(device_id))
+        await self._request("PUT", "/me/player/shuffle", params=params)
+
+    async def set_repeat(self, mode: str, *, device_id: str | None = None) -> None:
+        if mode not in REPEAT_MODES:
+            raise SpotifyError(f"repeat must be one of {', '.join(sorted(REPEAT_MODES))}")
+        params: dict[str, Any] = {"state": mode}
+        params.update(_device_param(device_id))
+        await self._request("PUT", "/me/player/repeat", params=params)
+
+    async def add_to_queue(self, uri: str, *, device_id: str | None = None) -> None:
+        params: dict[str, Any] = {"uri": uri}
+        params.update(_device_param(device_id))
+        await self._request("POST", "/me/player/queue", params=params)
+
+    async def queue(self, limit: int = 5) -> list[Playable]:
+        payload = await self._request("GET", "/me/player/queue")
+        items = (payload or {}).get("queue") or []
+        return [_playable(item) for item in items[:limit] if item and item.get("uri")]
+
+    async def recently_played(self, limit: int = 5) -> list[Playable]:
+        payload = await self._request("GET", "/me/player/recently-played", params={"limit": limit})
+        items = (payload or {}).get("items") or []
+        return [
+            _playable(entry["track"]) for entry in items if entry and (entry.get("track") or {}).get("uri")
+        ]
+
+    async def saved(self, track_id: str) -> bool:
+        payload = await self._request("GET", "/me/tracks/contains", params={"ids": track_id})
+        # This endpoint answers with a bare JSON array, where the rest of the API sends an object.
+        return bool(isinstance(payload, list) and payload and payload[0])
+
+    async def save(self, track_id: str, *, remove: bool = False) -> None:
+        method = "DELETE" if remove else "PUT"
+        await self._request(method, "/me/tracks", params={"ids": track_id})
+
+    async def playlists(self, limit: int = 50) -> list[Playable]:
+        """The user's own playlists, which a public search won't find."""
+        payload = await self._request("GET", "/me/playlists", params={"limit": limit})
+        items = (payload or {}).get("items") or []
+        return [
+            Playable(name=item.get("name", "unknown"), uri=item["uri"], kind="playlist")
+            for item in items
+            if item and item.get("uri")
+        ]
+
+    async def add_to_playlist(self, playlist_id: str, uri: str) -> None:
+        await self._request("POST", f"/playlists/{playlist_id}/tracks", json={"uris": [uri]})
+
     async def _request(
         self,
         method: str,
@@ -159,7 +250,7 @@ class SpotifyClient:
         params: dict | None = None,
         json: dict | None = None,
         retrying: bool = False,
-    ) -> dict | None:
+    ) -> dict | list | None:
         token = await self._auth.access_token()
         response = await self._client.request(
             method,
@@ -177,7 +268,7 @@ class SpotifyClient:
         return _interpret(response)
 
 
-def _interpret(response: httpx.Response) -> dict | None:
+def _interpret(response: httpx.Response) -> dict | list | None:
     if response.status_code == 204 or not response.content:
         return None
     if response.status_code == 404 and "device" in response.text.lower():
@@ -223,6 +314,22 @@ def _device(item: dict) -> Device:
         volume_percent=item.get("volume_percent"),
         supports_volume=bool(item.get("supports_volume", True)),
     )
+
+
+def _playable(item: dict) -> Playable:
+    kind = item.get("type") or "track"
+    return Playable(
+        name=item.get("name", "unknown"),
+        uri=item["uri"],
+        kind=kind,
+        artists=_artists(item) or (item.get("show") or {}).get("name", ""),
+    )
+
+
+def clock(milliseconds: int) -> str:
+    """Milliseconds as a spoken clock, e.g. 1:04."""
+    total = max(0, milliseconds) // 1000
+    return f"{total // 60}:{total % 60:02d}"
 
 
 def _artists(item: dict) -> str:

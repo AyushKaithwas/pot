@@ -25,6 +25,7 @@ from pot.skills.music.spotify.client import (
     RestrictionViolated,
     SpotifyClient,
     SpotifyError,
+    clock,
 )
 from pot.skills.music.spotify.speaker import ManagedSpeaker
 
@@ -68,6 +69,7 @@ class SpotifyProvider:
         *,
         client: SpotifyClient | None = None,
         speaker: ManagedSpeaker | None = None,
+        output: object | None = None,
     ) -> None:
         self.settings = settings
         music = settings.music
@@ -77,7 +79,7 @@ class SpotifyProvider:
             store=TokenStore(music.spotify.token_path()),
         )
         self._client = client or SpotifyClient(self._auth)
-        self._speaker = speaker if speaker is not None else ManagedSpeaker(settings)
+        self._speaker = speaker if speaker is not None else ManagedSpeaker(settings, output)
 
     @property
     def auth(self) -> SpotifyAuth:
@@ -124,6 +126,85 @@ class SpotifyProvider:
             return "there's nothing further back" if backwards else "nothing is queued after this"
         playing = await self._client.now_playing()
         return playing.describe() if playing else ("went back" if backwards else "skipped")
+
+    @_translated
+    async def seek(self, seconds: int, relative: bool = True) -> str:
+        """Jump within the track. Relative for "forward twenty seconds", absolute for "from 1:30"."""
+        playing = await self._client.now_playing()
+        if playing is None:
+            raise MusicError("nothing is playing")
+        target_ms = seconds * 1000
+        if relative:
+            target_ms += playing.position_ms or 0
+        if playing.duration_ms is not None:
+            # Past the end is a skip as far as Spotify is concerned, which is rarely what was meant.
+            target_ms = min(target_ms, playing.duration_ms - 1000)
+        target_ms = max(0, target_ms)
+        await self._client.seek(target_ms)
+        return f"at {clock(target_ms)} of {playing.title}"
+
+    @_translated
+    async def set_shuffle(self, on: bool) -> str:
+        await self._client.set_shuffle(on)
+        return "shuffling" if on else "playing in order"
+
+    @_translated
+    async def set_repeat(self, mode: str) -> str:
+        await self._client.set_repeat(mode)
+        return {
+            "off": "repeat off",
+            "track": "repeating this track",
+            "context": "repeating the whole thing",
+        }[mode]
+
+    @_translated
+    async def queue(self, query: str, kind: str = DEFAULT_KIND) -> str:
+        playables = await self._find(query, kind)
+        await self._client.add_to_queue(playables[0].uri)
+        return f"queued {playables[0].describe()}"
+
+    @_translated
+    async def upcoming(self) -> str:
+        items = await self._client.queue()
+        if not items:
+            return "nothing is queued after this"
+        return "next up: " + "; ".join(item.describe() for item in items)
+
+    @_translated
+    async def recent(self) -> str:
+        items = await self._client.recently_played()
+        if not items:
+            return "nothing has played recently"
+        return "recently: " + "; ".join(item.describe() for item in items)
+
+    @_translated
+    async def save_current(self, remove: bool = False) -> str:
+        playing = await self._client.now_playing()
+        if playing is None or not playing.uri:
+            raise MusicError("nothing is playing")
+        track_id = playing.uri.rsplit(":", 1)[-1]
+        if not remove and await self._client.saved(track_id):
+            return f"{playing.title} is already in your library"
+        await self._client.save(track_id, remove=remove)
+        verb = "removed from" if remove else "saved to"
+        return f"{playing.title} {verb} your library"
+
+    @_translated
+    async def add_current_to_playlist(self, playlist: str) -> str:
+        playing = await self._client.now_playing()
+        if playing is None or not playing.uri:
+            raise MusicError("nothing is playing")
+        wanted = normalize(playlist)
+        matches = [p for p in await self._client.playlists() if wanted in normalize(p.name)]
+        if not matches:
+            raise MusicError(f"you have no playlist called {playlist!r}")
+        await self._client.add_to_playlist(matches[0].uri.rsplit(":", 1)[-1], playing.uri)
+        return f"added {playing.title} to {matches[0].name}"
+
+    @_translated
+    async def move(self, speaker: Speaker) -> str:
+        await self._client.transfer(speaker.id, play=True)
+        return f"moved to {speaker.name}"
 
     @_translated
     async def set_volume(self, percent: int) -> None:
