@@ -53,6 +53,12 @@ class Alarm:
     # Set for repeating alarms so the time of day survives being rescheduled.
     at_time: time | None = None
     snoozed_from: datetime | None = None
+    # What Pot should do when this fires, in the user's own words ("play Wavy by Karan Aujla").
+    # Kept as text rather than a resolved tool call so any skill can be the thing that happens.
+    then: str = ""
+    # Whether this is meant to get your attention. An alarm is asked for as an alarm, so it rings
+    # until stopped; "turn the lights on in ten seconds" is just a job with a time on it.
+    ring: bool = True
 
     @property
     def recurring(self) -> bool:
@@ -96,6 +102,8 @@ class Alarm:
             "label": self.label,
             "repeat": self.repeat.value,
             "at_time": self.at_time.isoformat() if self.at_time else None,
+            "then": self.then,
+            "ring": self.ring,
         }
 
     @classmethod
@@ -108,6 +116,8 @@ class Alarm:
             label=data.get("label", ""),
             repeat=Repeat(data.get("repeat", "once")),
             at_time=time.fromisoformat(at_time) if at_time else None,
+            then=data.get("then", ""),
+            ring=bool(data.get("ring", True)),
         )
 
 
@@ -183,6 +193,8 @@ class AlarmStore:
         label: str = "",
         repeat: Repeat = Repeat.ONCE,
         at_time: time | None = None,
+        then: str = "",
+        ring: bool = True,
     ) -> Alarm:
         alarm = Alarm(
             id=self._next_id(),
@@ -191,6 +203,8 @@ class AlarmStore:
             label=label,
             repeat=repeat,
             at_time=at_time if repeat is not Repeat.ONCE else None,
+            then=then,
+            ring=ring,
         )
         self.alarms[alarm.id] = alarm
         self.save()

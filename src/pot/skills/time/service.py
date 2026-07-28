@@ -41,8 +41,9 @@ class TimeService:
 
     # -- setting things ------------------------------------------------------------------
 
-    def add_timer(self, seconds: int, label: str = "") -> Alarm:
-        return self.store.add(Kind.TIMER, datetime.now() + timedelta(seconds=seconds), label=label)
+    def add_timer(self, seconds: int, label: str = "", then: str = "", ring: bool = True) -> Alarm:
+        when = datetime.now() + timedelta(seconds=seconds)
+        return self.store.add(Kind.TIMER, when, label=label, then=then, ring=ring)
 
     def add_alarm(
         self,
@@ -51,11 +52,21 @@ class TimeService:
         on: date | None = None,
         label: str = "",
         repeat: Repeat = Repeat.ONCE,
+        then: str = "",
+        ring: bool = True,
     ) -> Alarm:
-        return self.store.add(Kind.ALARM, next_datetime(at, on), label=label, repeat=repeat, at_time=at)
+        return self.store.add(
+            Kind.ALARM,
+            next_datetime(at, on),
+            label=label,
+            repeat=repeat,
+            at_time=at,
+            then=then,
+            ring=ring,
+        )
 
-    def add_reminder(self, when: datetime, text: str) -> Alarm:
-        return self.store.add(Kind.REMINDER, when, label=text)
+    def add_reminder(self, when: datetime, text: str, then: str = "", ring: bool = True) -> Alarm:
+        return self.store.add(Kind.REMINDER, when, label=text, then=then, ring=ring)
 
     def cancel(self, alarm_id: str) -> Alarm | None:
         if self._ringing is not None and self._ringing.id == alarm_id:
@@ -123,17 +134,26 @@ class TimeService:
     def _fire(self, alarm: Alarm, now: datetime) -> None:
         # Settle first: if anything below throws, the alarm has still moved on and won't spin.
         self.store.settle(alarm, now)
-        if self._ringing is not None:
-            return  # already making noise; one at a time is enough
-
-        self._ringing = alarm
         name = alarm.label or alarm.kind.value
         log.info("%s %s fired", alarm.kind.value, name)
+
+        if not alarm.ring:
+            # Nobody asked to be alerted, so there is nothing to ring and nothing to stop: the job
+            # is the whole point. Staying quiet also keeps music unducked, in case the job is music.
+            self._say(_spoken(alarm))
+            return
+
+        if self._ringing is not None:
+            return  # already making noise; one at a time is enough
+        self._ringing = alarm
         if self.ringer is not None:
             self.ringer.start(name)
         self._set_quiet(True)
+        self._say(_spoken(alarm))
+
+    def _say(self, text: str) -> None:
         if self._announce is not None:
-            self._announce(_spoken(alarm))
+            self._announce(text)
 
     def _set_quiet(self, quiet: bool) -> None:
         """Duck music while ringing: an alarm competing with a song is no use."""
@@ -146,6 +166,17 @@ class TimeService:
 
 def _spoken(alarm: Alarm) -> str:
     name = alarm.label.strip()
+    if alarm.then and not alarm.ring:
+        return f"The {name} you set is due. Do this now: {alarm.then}"
+    if alarm.then:
+        # It keeps ringing until the user says so, which is what they asked for by calling it an
+        # alarm. Silencing it on their behalf is how "stop the alarm" gets answered with
+        # "nothing is ringing". The exception is a job that makes its own noise: music is ducked
+        # while anything is ringing, so the two would fight and the job would lose.
+        return (
+            f"The {name} is ringing. Do this as well, now: {alarm.then}. "
+            "If that makes any sound of its own, call stop_alarm first."
+        )
     if alarm.kind is Kind.REMINDER:
         return f"Reminder: {name}" if name else "You asked me to remind you about something."
     if alarm.kind is Kind.TIMER:

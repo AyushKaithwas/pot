@@ -18,10 +18,36 @@ from pot.skills.time.service import DEFAULT_SNOOZE_MINUTES, get_service
 
 log = logging.getLogger(__name__)
 
+SECONDS_PER = {
+    "s": 1,
+    "sec": 1,
+    "second": 1,
+    "m": 60,
+    "min": 60,
+    "minute": 60,
+    "h": 3600,
+    "hr": 3600,
+    "hour": 3600,
+}
+
 PROMPT = """
 Time: timers count down, alarms happen at a clock time, reminders say words back.
-- You convert the language, the tools take numbers: "ten minutes" is 600 seconds, "quarter past
-  seven" is "19:15" if that's the next one due, "every weekday" is repeat="weekdays".
+- Pass the number and the unit the user actually said and let the tool do the arithmetic:
+  "ten seconds" is duration=10 unit="seconds", "ten minutes" is duration=10 unit="minutes".
+- You still convert the wording the tools have no field for: "quarter past seven" is "19:15" if
+  that's the next one due, "every weekday" is repeat="weekdays".
+- Never swap the unit for a larger one: "twenty seconds" is duration=20 unit="seconds", never any
+  number of minutes. If you didn't catch the number or the unit, ask instead of guessing.
+- Read the length back from what the tool returned, not from what you meant to set. If they
+  disagree the tool is right, and saying the wrong one is how a ten second timer becomes ten
+  minutes with nobody noticing.
+- "when it goes off, play X" is the `then` argument, in the user's words. Pot does it when the
+  time comes, so promise it only when you've actually passed it. There's no other way to schedule
+  an action, and a `then` runs whether or not the alarm also rings.
+- `ring` follows what they asked for. Called it an alarm, a timer or a reminder? It rings, and it
+  keeps ringing until they stop it. Just a job with a time on it ("turn the lights on in ten
+  seconds", "lights off at eleven")? ring=false, so nothing chimes and there's nothing to stop.
+  Also ring=false when the `then` is itself the alert, like waking them up to music.
 - Check current_time first whenever the request depends on today's date or the current hour.
 - Alarms ring until stopped. When one is ringing, "stop" means stop_alarm and "snooze" means
   snooze; use them rather than talking over it.
@@ -29,22 +55,48 @@ Time: timers count down, alarms happen at a clock time, reminders say words back
 """.strip()
 
 
+def _to_seconds(duration: int, unit: str) -> int | None:
+    """A count and its unit, which is what the user said, rather than a number to be multiplied.
+
+    Asking the model for seconds looks simpler and reads back wrong: "ten seconds" and "ten
+    minutes" both arrive as 10, and whichever example the prompt gives is the one it copies.
+    """
+    singular = unit.strip().lower().removesuffix("s") or unit.strip().lower()
+    multiplier = SECONDS_PER.get(singular)
+    return None if multiplier is None else duration * multiplier
+
+
 @function_tool
-def set_timer(seconds: int, label: str = "") -> str:
-    """Start a countdown that rings when it finishes.
+def set_timer(
+    duration: int, unit: str = "seconds", label: str = "", then: str = "", ring: bool = True
+) -> str:
+    """Start a countdown. Rings when it finishes unless told not to.
 
     Args:
-        seconds: Total length in whole seconds; convert minutes and hours yourself.
+        duration: How many of `unit` to count down. For "ten minutes" this is 10, not 600.
+        unit: seconds, minutes or hours. Say what the user said and let this do the arithmetic.
         label: Short name, e.g. "pasta". Optional.
+        then: What to do when it fires, e.g. "play Wavy by Karan Aujla". Optional.
+        ring: False for a job with a time on it that shouldn't chime, e.g. "lights on in a minute".
     """
+    seconds = _to_seconds(duration, unit)
+    if seconds is None:
+        return f"I don't know the unit {unit!r}. Use seconds, minutes or hours."
     if seconds <= 0:
-        return "A timer needs a positive number of seconds."
-    alarm = get_service().add_timer(seconds, label.strip())
-    return f"Timer {alarm.id} set: {alarm.describe()}"
+        return "A timer needs a positive length."
+    alarm = get_service().add_timer(seconds, label.strip(), then.strip(), ring)
+    return f"Timer {alarm.id} set: {alarm.describe()}. Say that length back exactly."
 
 
 @function_tool
-def set_alarm(at: str, repeat: str = "once", label: str = "", on: str = "") -> str:
+def set_alarm(
+    at: str,
+    repeat: str = "once",
+    label: str = "",
+    on: str = "",
+    then: str = "",
+    ring: bool = True,
+) -> str:
     """Set an alarm for a clock time. It rings until stopped or snoozed.
 
     Args:
@@ -52,6 +104,8 @@ def set_alarm(at: str, repeat: str = "once", label: str = "", on: str = "") -> s
         repeat: once, daily, weekdays, weekends or weekly.
         label: Short name, e.g. "gym". Optional.
         on: Optional ISO date ("2026-08-01") for a specific day rather than the next one.
+        then: What to do when it fires, e.g. "play the news". Optional.
+        ring: False for a job with a time on it that shouldn't chime, e.g. "lights off at eleven".
     """
     try:
         at_time = time.fromisoformat(at.strip())
@@ -69,21 +123,27 @@ def set_alarm(at: str, repeat: str = "once", label: str = "", on: str = "") -> s
         except ValueError:
             return f"I need an ISO date like 2026-08-01, not {on!r}."
 
-    alarm = get_service().add_alarm(at_time, on=day, label=label.strip(), repeat=repeat_rule)
+    alarm = get_service().add_alarm(
+        at_time, on=day, label=label.strip(), repeat=repeat_rule, then=then.strip(), ring=ring
+    )
     return f"Alarm {alarm.id} set: {alarm.describe()}"
 
 
 @function_tool
-def remind_me(text: str, seconds: int = 0, at: str = "") -> str:
+def remind_me(text: str, delay: int = 0, unit: str = "seconds", at: str = "") -> str:
     """Say something back later, either after a delay or at a clock time.
 
     Args:
         text: What to say when it fires.
-        seconds: Delay in whole seconds. Use this or `at`, not both.
+        delay: How many of `unit` to wait. Use this or `at`, not both.
+        unit: seconds, minutes or hours. Say what the user said, don't convert.
         at: 24-hour time, e.g. "18:00", for the next time that comes round.
     """
     if not text.strip():
         return "A reminder needs something to say."
+    seconds = _to_seconds(delay, unit)
+    if seconds is None:
+        return f"I don't know the unit {unit!r}. Use seconds, minutes or hours."
     service = get_service()
     if at.strip():
         try:
@@ -96,7 +156,7 @@ def remind_me(text: str, seconds: int = 0, at: str = "") -> str:
     elif seconds > 0:
         alarm = service.add_reminder(datetime.now() + timedelta(seconds=seconds), text.strip())
     else:
-        return "Tell me when: a delay in seconds, or a time like 18:00."
+        return "Tell me when: a delay, or a time like 18:00."
     return f"Reminder {alarm.id} set: {alarm.describe()}"
 
 
