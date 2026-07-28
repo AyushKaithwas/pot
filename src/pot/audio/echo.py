@@ -10,9 +10,10 @@ delayed playback spectrum from the microphone spectrum. That's echo *suppression
 cancellation. It leaves artefacts a human would notice, which is fine, because it's only applied to
 the detector's copy of the audio and never to what Pot sends to the model.
 
-What this cannot do is remove music playing from Spotify: that audio comes from another process or
-another device, so there's no reference to subtract. Either keep music off Pot's own speaker or use
-an operating-system echo canceller that taps the speaker's monitor; see the README.
+Music counts as playback too, as long as it goes through Pot's own mixer, which is why librespot
+is piped through Pot rather than left to reach the sound card itself. Music playing on a phone, a
+desktop app or another speaker has no reference and cannot be removed, so Pot has to compete with
+it acoustically and generally loses.
 """
 
 from __future__ import annotations
@@ -36,6 +37,9 @@ SPECTRAL_FLOOR = 0.05
 BANDS = 24
 # Envelope correlation needs a bit of history before it means anything.
 MIN_BLOCKS_FOR_ALIGNMENT = 40
+# Below this a reference block is silence, and subtracting silence can only damage the microphone.
+# Roughly -55 dBFS: quiet enough that no real playback lands under it.
+SILENT_RMS = 60.0
 
 
 class EchoSuppressor:
@@ -66,6 +70,11 @@ class EchoSuppressor:
         self._mic_energy: list[float] = []
         self._delay_blocks = 1
         self._pending = bytearray()
+        # Mic blocks seen since the speaker last produced anything. Playback and mic audio arrive
+        # from different places at different times, so this is what tells us the reference still
+        # describes something the microphone could actually be hearing.
+        self._blocks_since_playback = 0
+        self._silent_energy = SILENT_RMS**2 * self.block
         self.suppressed_blocks = 0
 
     @property
@@ -81,6 +90,7 @@ class EchoSuppressor:
             spectrum = np.abs(np.fft.rfft(block * self._window))
             self._reference.append(spectrum)
             self._reference_energy.append(float(np.dot(block, block)))
+            self._blocks_since_playback = 0
             if len(self._reference) > self._max_blocks:
                 del self._reference[0]
                 del self._reference_energy[0]
@@ -88,6 +98,9 @@ class EchoSuppressor:
     def process(self, pcm: bytes) -> bytes:
         """Clean a chunk of mic audio. Returns it unchanged when there's nothing to subtract."""
         if not self.enabled or not self._reference:
+            return pcm
+        if self._is_stale():
+            self.reset()
             return pcm
 
         self._pending.extend(pcm)
@@ -109,12 +122,26 @@ class EchoSuppressor:
         self._mic_energy.clear()
         self._pending.clear()
 
+    def _is_stale(self) -> bool:
+        """Has the speaker been quiet for longer than the echo takes to come back?
+
+        If so, whatever is left in the reference has already been and gone, and subtracting it
+        would mean removing Pot's last sentence from a silent room. The reference is still
+        speech-shaped and the per-band scale is fitted to whatever the mic hears, so it would find
+        plenty to remove: the person talking. That's the wake word going deaf after a reply.
+        """
+        # Against the round trip we actually measured, not the window we searched: the search
+        # window is ten times the real delay, and waiting that long means damaging the first
+        # third of a second of whatever the user says next.
+        return self._blocks_since_playback > self._delay_blocks + 2
+
     def _blocks(self, pcm: bytes):
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
         for start in range(0, len(samples) - self.block + 1, self.block):
             yield samples[start : start + self.block]
 
     def _track_mic(self, block: np.ndarray) -> None:
+        self._blocks_since_playback += 1
         self._mic_energy.append(float(np.dot(block, block)))
         if len(self._mic_energy) > self._max_blocks:
             del self._mic_energy[0]
@@ -146,7 +173,10 @@ class EchoSuppressor:
 
     def _clean(self, block: np.ndarray) -> bytes:
         index = len(self._reference) - self._delay_blocks
-        if index < 0:
+        if index < 0 or self._is_stale() or self._reference_energy[index] < self._silent_energy:
+            # Nothing was coming out of the speaker then, so there is no echo to remove now. The
+            # per-band scale is fitted to the microphone, so a silent reference would still find
+            # something to subtract, and what it finds is whoever is talking.
             return block.astype(np.int16).tobytes()
 
         spectrum = np.fft.rfft(block * self._window)

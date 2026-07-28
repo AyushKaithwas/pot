@@ -120,3 +120,38 @@ def test_reset_forgets_the_playback_history():
     suppressor.reset()
     speech = noisy_speech(0.2)
     assert np.array_equal(np.frombuffer(suppressor.process(speech.tobytes()), dtype=np.int16), speech)
+
+
+def test_the_mic_is_left_alone_once_pot_has_stopped_talking():
+    """The bug this catches: the wake word going deaf after Pot's first reply.
+
+    Playback stops but the reference keeps its last few hundred milliseconds of Pot, and that is
+    still speech-shaped, so a suppressor that goes on subtracting removes whoever speaks next.
+    """
+    suppressor = EchoSuppressor(RATE)
+    playback = tone(0.5, 440)
+    run(suppressor, playback, echo_of(playback, int(RATE * 0.06), 0.5))
+
+    speech = noisy_speech(1.0)
+    step = int(RATE * BLOCK_MILLISECONDS / 1000)
+    out = bytearray()
+    for start in range(0, len(speech) - step + 1, step):
+        out.extend(suppressor.process(speech[start : start + step].tobytes()))
+    heard = np.frombuffer(bytes(out), dtype=np.int16)
+
+    kept = energy(heard) / max(energy(speech[: len(heard)]), 1e-9)
+    assert kept > 0.9, f"only {kept:.0%} of the speech survived after Pot went quiet"
+
+
+def test_silence_from_the_speaker_is_not_subtracted():
+    """A silent reference still fits a scale to the mic, and what it fits is the user."""
+    suppressor = EchoSuppressor(RATE)
+    speech = noisy_speech(0.5)
+    step = int(RATE * BLOCK_MILLISECONDS / 1000)
+    out = bytearray()
+    for start in range(0, len(speech) - step + 1, step):
+        suppressor.playback(np.zeros(step, dtype=np.int16).tobytes())
+        out.extend(suppressor.process(speech[start : start + step].tobytes()))
+    heard = np.frombuffer(bytes(out), dtype=np.int16)
+
+    assert energy(heard) / max(energy(speech[: len(heard)]), 1e-9) > 0.9

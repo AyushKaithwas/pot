@@ -79,6 +79,9 @@ class Ringer:
                         gap_seconds=0.05,
                     )
                 )
+                # Each chime is complete in itself, so don't let the resampler hold its last note
+                # back until the next one.
+                self._speaker.finish()
                 volume = min(MAX_VOLUME, volume + VOLUME_STEP)
                 await asyncio.sleep(GAP_SECONDS + NOTE_SECONDS * len(CHIME_NOTES))
         except asyncio.CancelledError:

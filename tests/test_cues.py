@@ -113,3 +113,21 @@ def test_listening_and_stopping_sound_different():
 
 def test_the_tick_interval_is_long_enough_not_to_nag():
     assert WORKING_TICK_SECONDS >= 3.0
+
+
+def test_a_cue_deafens_the_mic_while_it_sounds():
+    """Otherwise Pot's own blip comes back as a user turn: transcribed, charged for, answered."""
+    muted: list[float] = []
+    cues = Cues(FakeSpeaker(), sample_rate=24000, mute=muted.append)
+    cues.ready()
+
+    assert muted, "the mic has to be told to ignore what it is about to hear"
+    assert 0.2 < muted[0] < 1.5, f"muted for {muted[0]}s: long enough to cover the cue, not a reply"
+
+
+def test_a_skipped_cue_does_not_deafen_anything():
+    muted: list[float] = []
+    speaker = FakeSpeaker()
+    speaker.playing = True
+    Cues(speaker, sample_rate=24000, mute=muted.append).ready()
+    assert muted == [], "no cue was played, so there is nothing to ignore"

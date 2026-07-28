@@ -15,13 +15,17 @@ import logging
 import math
 import struct
 import time
+from collections.abc import Callable
 
-from pot.audio.playback import Speaker
+from pot.audio.playback import BYTES_PER_SAMPLE, Speaker
 
 log = logging.getLogger(__name__)
 
 FADE_SECONDS = 0.006  # clicks are worse than the cue itself; keep the edges soft
 WORKING_TICK_SECONDS = 5.0
+# Extra deafness after a cue has finished, covering the pre-buffer before it reaches the
+# speaker and the room's own tail. Short enough not to swallow a reply that follows it.
+MUTE_TAIL_SECONDS = 0.45
 
 
 def tone(
@@ -49,8 +53,18 @@ def tone(
 class Cues:
     """Speaks the interface state, for a device with no screen."""
 
-    def __init__(self, speaker: Speaker, *, sample_rate: int, volume: float = 0.2, enabled: bool = True):
+    def __init__(
+        self,
+        speaker: Speaker,
+        *,
+        sample_rate: int,
+        volume: float = 0.2,
+        enabled: bool = True,
+        mute: Callable[[float], None] | None = None,
+    ):
         self._speaker = speaker
+        self._mute = mute
+        self._sample_rate = sample_rate
         self.enabled = enabled
         rate, level = sample_rate, volume
         self._ready = tone([660, 880], sample_rate=rate, volume=level)
@@ -88,4 +102,9 @@ class Cues:
         if not self.enabled or self._speaker.is_playing:
             return False
         self._speaker.write(pcm)
+        if self._mute is not None:
+            # Deafen the mic while this is audible. A cue is short, loud, and comes out of the
+            # speaker the mic is sitting next to, so otherwise it arrives back as a user turn and
+            # gets transcribed into nonsense, charged for, and answered.
+            self._mute(len(pcm) / BYTES_PER_SAMPLE / self._sample_rate + MUTE_TAIL_SECONDS)
         return True

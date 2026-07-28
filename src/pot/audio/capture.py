@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
-import numpy as np
 import sounddevice as sd
-import soxr
 
-from pot.audio.devices import default_samplerate, find_device
+from pot.audio.devices import find_device, stream_rate
+from pot.audio.resample import StreamResampler
 
 log = logging.getLogger(__name__)
 
@@ -29,13 +29,27 @@ QUEUE_MAX_CHUNKS = 100
 class MicrophoneGate:
     """Open while the user is talking to Pot, closed while Pot talks back."""
 
-    def __init__(self, *, open_at_start: bool = False) -> None:
+    def __init__(self, *, open_at_start: bool = False, clock=time.monotonic) -> None:
         self._open = open_at_start
+        self._muted_until = 0.0
+        self._clock = clock
         self.changed = asyncio.Event()
 
     @property
     def is_open(self) -> bool:
         return self._open
+
+    @property
+    def is_muted(self) -> bool:
+        """Briefly deaf, because what the mic is hearing right now is Pot's own noise.
+
+        An earcon is short and loud and goes out of the same speaker the mic is next to, so it
+        comes back as a "user turn" of gibberish that gets transcribed, charged for, and answered.
+        """
+        return self._clock() < self._muted_until
+
+    def mute_for(self, seconds: float) -> None:
+        self._muted_until = max(self._muted_until, self._clock() + seconds)
 
     def open(self) -> None:
         self._set(True)
@@ -65,7 +79,7 @@ class Microphone:
         self.gate = gate or MicrophoneGate(open_at_start=True)
         self._device = find_device(device_name, kind="input")
         self._native_rate = self._pick_rate()
-        self._resampler: soxr.ResampleStream | None = None
+        self._resampler: StreamResampler | None = None
         self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=QUEUE_MAX_CHUNKS)
         self._stream: sd.RawInputStream | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -79,18 +93,15 @@ class Microphone:
         return rate
 
     def _pick_rate(self) -> int:
-        try:
-            sd.check_input_settings(device=self._device, samplerate=self.target_rate, channels=1)
-            return self.target_rate
-        except Exception:
-            native = default_samplerate(self._device, kind="input")
-            log.info("input device won't do %s Hz, capturing at %s Hz", self.target_rate, native)
-            return native
+        rate = stream_rate(self._device, kind="input", wanted=self.target_rate)
+        if rate != self.target_rate:
+            log.info("capturing at the device's own %s Hz and resampling to %s", rate, self.target_rate)
+        return rate
 
     async def __aenter__(self) -> Microphone:
         self._loop = asyncio.get_running_loop()
         if self._native_rate != self.target_rate:
-            self._resampler = soxr.ResampleStream(self._native_rate, self.target_rate, 1, dtype="int16")
+            self._resampler = StreamResampler(self._native_rate, self.target_rate)
         blocksize = int(self._native_rate * BLOCK_MILLISECONDS / 1000)
         self._stream = sd.RawInputStream(
             samplerate=self._native_rate,
@@ -119,8 +130,7 @@ class Microphone:
         chunk = bytes(indata)
         if self._resampler is not None:
             # The streaming resampler buffers, so some blocks come back empty.
-            samples = np.frombuffer(chunk, dtype=np.int16)
-            chunk = self._resampler.resample_chunk(samples).tobytes()
+            chunk = self._resampler.feed(chunk)
             if not chunk:
                 return
         self._loop.call_soon_threadsafe(self._enqueue, chunk)

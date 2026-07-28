@@ -27,6 +27,25 @@ def default_samplerate(device: int | None, *, kind: str) -> int:
     return int(info["default_samplerate"])
 
 
+def stream_rate(device: int | None, *, kind: str, wanted: int) -> int:
+    """The rate to actually open the stream at, which is the one the hardware is running.
+
+    PortAudio accepts a rate the device isn't running at and quietly lets the operating system
+    convert. That conversion is somebody else's resampler: on a 48 kHz Mac fed a 24 kHz stream it
+    adds a harsh buzz over the top of otherwise clean speech. Opening the device at its own rate
+    and converting with soxr is both better and the same on every machine.
+    """
+    native = default_samplerate(device, kind=kind)
+    if native == wanted:
+        return wanted
+    check = sd.check_input_settings if kind == "input" else sd.check_output_settings
+    try:
+        check(device=device, samplerate=native, channels=1)
+    except Exception:
+        return wanted
+    return native
+
+
 def describe(device: int | None, *, kind: str) -> str:
     info = sd.query_devices(device, kind)
     return f"{info['name']} @ {int(info['default_samplerate'])} Hz"
