@@ -61,7 +61,7 @@ def executable() -> str:
     return str(candidate if candidate.exists() else "pot")
 
 
-def render_unit(*, description: str = "Pot voice assistant", repo: str = "ayuzz/pot") -> str:
+def render_unit(*, description: str = "Pot voice assistant", repo: str = "AyushKaithwas/pot") -> str:
     return UNIT_TEMPLATE.format(
         description=description,
         repo=repo,
