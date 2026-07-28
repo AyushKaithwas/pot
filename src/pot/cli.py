@@ -124,8 +124,19 @@ def doctor() -> None:
     """Check keys, audio devices and light reachability."""
     settings = _setup().settings
     console.print(f"[bold]config[/bold] {settings.assistant.name}, voice model {settings.voice.model}")
-    _check("OPENAI_API_KEY", bool(settings.openai_api_key))
-    _check("Tuya cloud credentials", settings.has_tuya_cloud)
+    if settings.service.hosted:
+        _check(
+            f"model access via {settings.service.base_url or settings.service.realtime_url}",
+            bool(settings.service_token),
+            fix="set POT_SERVICE_TOKEN in ~/.config/pot/env",
+        )
+    else:
+        _check("OPENAI_API_KEY", bool(settings.openai_api_key), fix="put it in ~/.config/pot/env")
+    _check(
+        "Tuya cloud credentials",
+        settings.has_tuya_cloud,
+        fix="TUYA_API_KEY, TUYA_API_SECRET and TUYA_API_REGION in ~/.config/pot/env; see the README",
+    )
     unpriced = [model for model in _priced_models(settings) if model not in settings.costs.models]
     _check(
         "cost rates for every configured model" + (f" (missing: {', '.join(unpriced)})" if unpriced else ""),
@@ -142,7 +153,11 @@ def doctor() -> None:
         console.print(f"[yellow]no lights configured in {config_file()}[/yellow]")
         return
     for device in devices.values():
-        _check(f"local key for {device.spoken_name}", bool(device.local_key))
+        _check(
+            f"local key for {device.spoken_name}",
+            bool(device.local_key),
+            fix="run `pot lights keys` once the Tuya project is linked",
+        )
 
     found = asyncio.run(discovery.scan(timeout=6.0))
     by_gwid = {d.gwid: d for d in found}
@@ -481,7 +496,11 @@ def _check_audio(settings: Settings) -> None:
         # models being present, and the names existing.
         build(audio)
     except WakeWordUnavailable as exc:
-        _check(f"wake word ready ({exc})", False)
+        _check(
+            f"wake word ready ({exc})",
+            False,
+            fix="`uv sync --extra wakeword` installs it; models download themselves on first use",
+        )
         return
     _check("wake word ready", True)
 
@@ -750,7 +769,11 @@ def _check_music(settings: Settings) -> None:
     from pot.skills.music.spotify.speaker import ManagedSpeaker, install_hint
 
     spotify = settings.music.spotify
-    _check("Spotify client id", bool(spotify.client_id))
+    _check(
+        "Spotify client id",
+        bool(spotify.client_id),
+        fix="register an app at developer.spotify.com/dashboard, then set [music.spotify] client_id",
+    )
     auth = SpotifyAuth(spotify.client_id, spotify.redirect_port, TokenStore(spotify.token_path()))
     _check("signed in to Spotify (`pot music login`)", auth.logged_in)
 
@@ -927,9 +950,16 @@ def _priced_models(settings: Settings) -> list[str]:
     return [settings.voice.model, settings.research.model, settings.research.deep_model]
 
 
-def _check(label: str, ok: bool) -> None:
+def _check(label: str, ok: bool, fix: str = "") -> None:
+    """Report one requirement, and when it isn't met, what to do about it.
+
+    A bare "missing" leaves the reader to go and find out where the thing goes, and doctor is
+    exactly where someone lands when they're stuck.
+    """
     mark = "[green]ok[/green]" if ok else "[red]missing[/red]"
     console.print(f"  {mark} {label}")
+    if not ok and fix:
+        console.print(f"        [dim]{fix}[/dim]")
 
 
 if __name__ == "__main__":

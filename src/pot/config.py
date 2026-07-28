@@ -230,10 +230,38 @@ class LightsConfig(BaseModel):
     scenes: dict[str, dict[str, LightChangeSpec]] = Field(default_factory=dict)
 
 
+class ServiceConfig(BaseModel):
+    """Where model access comes from.
+
+    Empty means straight to OpenAI with your own key, which is what an install from source does and
+    what it will keep doing. Pointing this at a relay that holds the keys is the only change needed
+    for a hosted setup: the models are reached the same way either way, so nothing above this cares
+    which it is. The token is a secret, so it comes from the environment rather than from here.
+    """
+
+    # Where to reach an OpenAI-compatible API, e.g. "https://api.example.com/v1".
+    base_url: str = ""
+    # The realtime websocket, when it isn't derived from base_url.
+    realtime_url: str = ""
+
+    @property
+    def hosted(self) -> bool:
+        return bool(self.base_url or self.realtime_url)
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=env_file(), env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=env_file(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        # So a field with an environment alias can still be set by its own name, which is what
+        # every caller in the tests does.
+        populate_by_name=True,
+    )
 
     openai_api_key: str = ""
+    # Stands in for the OpenAI key when Pot is pointed at a service instead.
+    service_token: str = Field(default="", validation_alias="POT_SERVICE_TOKEN")
     tuya_api_key: str = ""
     tuya_api_secret: str = ""
     tuya_api_region: str = "in"
@@ -246,10 +274,48 @@ class Settings(BaseSettings):
     music: MusicConfig = Field(default_factory=MusicConfig)
     costs: CostConfig = Field(default_factory=CostConfig)
     lights: LightsConfig = Field(default_factory=LightsConfig)
+    service: ServiceConfig = Field(default_factory=ServiceConfig)
 
     @property
     def has_tuya_cloud(self) -> bool:
         return bool(self.tuya_api_key and self.tuya_api_secret)
+
+    @property
+    def model_token(self) -> str:
+        """Whatever authorises a model request: your own OpenAI key, or a service token."""
+        return self.service_token if self.service.hosted else self.openai_api_key
+
+    @property
+    def has_model_access(self) -> bool:
+        return bool(self.model_token)
+
+    def realtime_config(self) -> dict[str, object]:
+        """Connection settings for the realtime session.
+
+        The key is passed explicitly because pydantic-settings reads .env without exporting it, so
+        the SDK's own environment lookup would find nothing.
+        """
+        config: dict[str, object] = {"api_key": self.model_token}
+        url = self.service.realtime_url or _websocket_url(self.service.base_url)
+        if url:
+            config["url"] = url
+        return config
+
+    def openai_client_args(self) -> dict[str, object]:
+        """Constructor arguments for the plain OpenAI client, used by the research skill."""
+        args: dict[str, object] = {"api_key": self.model_token or None}
+        if self.service.base_url:
+            args["base_url"] = self.service.base_url
+        return args
+
+
+def _websocket_url(base_url: str) -> str:
+    """The realtime endpoint implied by an HTTP base url, so only one has to be configured."""
+    if not base_url:
+        return ""
+    scheme, _, rest = base_url.partition("://")
+    websocket = {"http": "ws", "https": "wss"}.get(scheme, scheme)
+    return f"{websocket}://{rest.rstrip('/')}/realtime"
 
 
 def normalize(text: str) -> str:

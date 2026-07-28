@@ -39,7 +39,7 @@ _client: AsyncOpenAI | None = None
 def _openai() -> AsyncOpenAI:
     global _client
     if _client is None:
-        _client = AsyncOpenAI(api_key=runtime().settings.openai_api_key or None)
+        _client = AsyncOpenAI(**runtime().settings.openai_client_args())
     return _client
 
 
@@ -53,7 +53,7 @@ async def research(question: str, depth: str = "quick") -> str:
     """
     rt = runtime()
     settings = rt.settings
-    if not settings.openai_api_key:
+    if not settings.has_model_access:
         return "I can't search: OPENAI_API_KEY isn't set."
 
     deep = depth.strip().lower() == "deep"

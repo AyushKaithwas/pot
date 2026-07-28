@@ -58,6 +58,16 @@ preroll_seconds = 0.2           # replayed on wake, in case detection lands a fr
                                 # higher and the wake word itself is sent and answered.
 conversation_idle_seconds = 15  # quiet for this long and Pot goes back to waiting for the word
 
+[service]
+# Empty means Pot talks to OpenAI directly with your own OPENAI_API_KEY. That is the default and
+# stays the default: this project expects you to bring your own keys.
+#
+# Point these at an OpenAI-compatible relay to have someone else hold the keys instead, with
+# POT_SERVICE_TOKEN in your env file as the credential. Only the endpoint changes; every feature
+# behaves the same either way.
+base_url = ""      # e.g. "https://api.example.com/v1"
+realtime_url = ""  # only if the websocket isn't <base_url>/realtime
+
 [skills]
 # Empty enabled = load everything discovered. disabled always wins.
 enabled = []

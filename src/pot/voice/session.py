@@ -67,8 +67,11 @@ class Announcer:
 
 
 async def run_voice(settings: Settings) -> None:
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set; put it in ~/.config/pot/env")
+    if not settings.has_model_access:
+        raise RuntimeError(
+            "no model access: put OPENAI_API_KEY in ~/.config/pot/env, or set [service] base_url "
+            "and POT_SERVICE_TOKEN to use a hosted one"
+        )
     _check_input_is_reachable(settings.audio)
 
     runtime = Runtime(settings)
@@ -109,9 +112,7 @@ async def run_voice(settings: Settings) -> None:
     console.print(f"mic {microphone.description} · speaker {speaker.description}")
     console.print(f"[dim]{_how_to_talk(audio_config, wake)}[/dim]")
 
-    # The key lives in .env, which pydantic-settings reads without exporting to the environment,
-    # so hand it to the model rather than letting it look itself up.
-    session = await runner.run(model_config={"api_key": settings.openai_api_key})
+    session = await runner.run(model_config=settings.realtime_config())
     async with session, speaker, microphone:
         runtime.on_announce(Announcer(session, window))
         await _start_skill_services(runtime, skills)
