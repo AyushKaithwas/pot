@@ -131,6 +131,11 @@ class AudioConfig(BaseModel):
     # music from another app or device has no reference and can't be removed.
     echo_suppression: bool = True
     sample_rate: int = 24000
+    # How much of Pot's voice to gather before playing any of it. The default suits a wired or
+    # quiet network; raise it wherever the round trip is uneven, since a jitter spike longer than
+    # this empties the buffer mid-word and is heard as a click. Measured on a Pi over Wi-Fi:
+    # 7ms best, 147ms worst, which needs roughly 300.
+    playback_buffer_ms: int = Field(default=120, ge=20, le=1000)
     input_device: str = ""
     output_device: str = ""
     wake: WakeConfig = Field(default_factory=WakeConfig)

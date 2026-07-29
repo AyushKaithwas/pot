@@ -35,6 +35,10 @@ cue_volume = 0.2
 # while Pot is talking. About 8 dB on a laptop; measure yours with `pot audio echo`. This cannot
 # touch music from another app, which has no reference signal: see the README.
 echo_suppression = true
+# Audio gathered before playback starts. A network spike longer than this empties the buffer
+# mid-word, which is heard as a click, and `pot talk` counts them when it exits. 120 is fine on a
+# wired or steady connection; try 300 on Wi-Fi. The cost is that Pot starts talking that much later.
+playback_buffer_ms = 120
 sample_rate = 24000
 input_device = ""       # substring of the device name, empty = system default. See `pot audio devices`
 output_device = ""

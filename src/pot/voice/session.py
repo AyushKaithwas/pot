@@ -87,7 +87,11 @@ async def run_voice(settings: Settings) -> None:
         device_name=audio_config.input_device,
         gate=gate,
     )
-    speaker = Speaker(sample_rate=audio_config.sample_rate, device_name=audio_config.output_device)
+    speaker = Speaker(
+        sample_rate=audio_config.sample_rate,
+        device_name=audio_config.output_device,
+        prebuffer_ms=audio_config.playback_buffer_ms,
+    )
     cues = Cues(
         speaker,
         sample_rate=audio_config.sample_rate,

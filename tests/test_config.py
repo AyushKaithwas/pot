@@ -11,8 +11,9 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from pot.config import deep_merge, load_settings, normalize, read_config
+from pot.config import AudioConfig, deep_merge, load_settings, normalize, read_config
 
 DEFAULTS = """
 [assistant]
@@ -115,3 +116,17 @@ def test_match_terms_cover_name_room_and_aliases(files, tmp_path: Path):
 
 def test_normalize_strips_punctuation_and_case():
     assert normalize("  Beta-1's Light!  ") == "beta1s light"
+
+
+def test_the_playback_buffer_can_be_raised_for_a_jittery_network():
+    """Measured on a Pi over Wi-Fi: 7ms best, 147ms worst. 120 can't absorb that; 300 can."""
+    assert AudioConfig().playback_buffer_ms == 120
+    assert AudioConfig(playback_buffer_ms=300).playback_buffer_ms == 300
+
+
+def test_an_absurd_playback_buffer_is_refused():
+    """A buffer measured in seconds would make Pot feel broken rather than smooth."""
+    with pytest.raises(ValidationError):
+        AudioConfig(playback_buffer_ms=5000)
+    with pytest.raises(ValidationError):
+        AudioConfig(playback_buffer_ms=0)

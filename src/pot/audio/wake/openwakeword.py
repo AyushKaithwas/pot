@@ -22,6 +22,20 @@ FRAME_SAMPLES = 1280  # 80 ms at 16 kHz, the window openWakeWord's models expect
 INSTALL_HINT = "install the wake word extra: uv sync --extra wakeword"
 
 
+def _quieten_onnxruntime() -> None:
+    """Stop onnxruntime warning about GPUs on a machine that has none.
+
+    It hunts for DRM devices at session creation and logs two warnings when it finds none, which on
+    a headless Pi means two lines of noise in the journal every time Pot starts.
+    """
+    try:
+        import onnxruntime
+
+        onnxruntime.set_default_logger_severity(3)  # errors only
+    except Exception:  # pragma: no cover - onnxruntime is optional
+        log.debug("could not quieten onnxruntime", exc_info=True)
+
+
 def available() -> bool:
     try:
         import openwakeword  # noqa: F401
@@ -99,6 +113,7 @@ class OpenWakeWordEngine:
     def __init__(self, models: Sequence[str] | str = ("hey_mycroft",), *, download_if_missing: bool = True):
         if not available():
             raise WakeWordUnavailable(f"openWakeWord is not installed. {INSTALL_HINT}")
+        _quieten_onnxruntime()
         from openwakeword.model import Model
 
         sources = [models] if isinstance(models, str) else list(models)
