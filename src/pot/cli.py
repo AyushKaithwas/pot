@@ -561,7 +561,11 @@ def audio_cues() -> None:
     settings = _setup().settings
 
     async def run() -> None:
-        speaker = Speaker(sample_rate=settings.audio.sample_rate, device_name=settings.audio.output_device)
+        speaker = Speaker(
+            sample_rate=settings.audio.sample_rate,
+            device_name=settings.audio.output_device,
+            prebuffer_ms=settings.audio.playback_buffer_ms,
+        )
         async with speaker:
             cues = Cues(speaker, sample_rate=settings.audio.sample_rate, volume=settings.audio.cue_volume)
             for name, play_cue in (
@@ -608,7 +612,11 @@ def audio_echo(seconds: float = typer.Option(4.0, "--seconds", "-s", min=2, max=
 
     async def measure(playing: bool) -> tuple[float, float, float]:
         echo = EchoSuppressor(rate, enabled=True)
-        speaker = Speaker(sample_rate=rate, device_name=audio.output_device)
+        speaker = Speaker(
+            sample_rate=rate,
+            device_name=audio.output_device,
+            prebuffer_ms=audio.playback_buffer_ms,
+        )
         microphone = Microphone(sample_rate=rate, device_name=audio.input_device)
         raw, clean = [], []
         async with speaker, microphone:

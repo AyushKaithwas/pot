@@ -120,7 +120,11 @@ async def score_recording(models: list[str], pcm: bytes, sample_rate: int) -> di
 
 
 async def play(audio: AudioConfig, pcm: bytes) -> None:
-    speaker = Speaker(sample_rate=audio.sample_rate, device_name=audio.output_device)
+    speaker = Speaker(
+        sample_rate=audio.sample_rate,
+        device_name=audio.output_device,
+        prebuffer_ms=audio.playback_buffer_ms,
+    )
     async with speaker:
         speaker.write(pcm)
         while speaker.is_playing:
