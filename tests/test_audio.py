@@ -210,3 +210,29 @@ async def test_pots_own_voice_is_still_in_the_reference():
         speaker.write(_loud(4800))
         await asyncio.sleep(0.25)
         assert np.abs(np.frombuffer(speaker.drain_reference(), dtype=np.int16)).max() > 0
+
+
+async def test_a_short_complete_sound_plays_even_behind_a_big_buffer():
+    """The bug this catches: raising the buffer to 300ms silenced every earcon.
+
+    A cue is ~200ms and arrives complete. The pre-buffer is there to ride out audio still on its
+    way from the network, so waiting for more than exists means it never plays at all.
+    """
+    speaker = Speaker(sample_rate=24000, prebuffer_ms=300)
+    async with speaker:
+        speaker.write(_loud(4800, 6000))  # 200ms, under the 300ms pre-buffer
+        speaker.finish()  # nothing more is coming
+        await asyncio.sleep(0.3)
+        played = np.abs(np.frombuffer(speaker.drain_reference(), dtype=np.int16)).max()
+
+    assert played > 1000, f"peak {played}: the cue never reached the speaker"
+
+
+async def test_a_partial_stream_still_waits_for_the_buffer():
+    """Streaming audio must still pre-buffer, or the jitter fix is undone."""
+    speaker = Speaker(sample_rate=24000, prebuffer_ms=300)
+    async with speaker:
+        speaker.write(_loud(2400, 6000))  # 100ms and more is expected
+        await asyncio.sleep(0.2)
+        # Under 10 rather than zero: the reference is resampled, and that rounds at the last bit.
+        assert np.abs(np.frombuffer(speaker.drain_reference(), dtype=np.int16)).max() < 10

@@ -17,6 +17,7 @@ class FakeSpeaker:
     def __init__(self, playing: bool = False) -> None:
         self.playing = playing
         self.written: list[bytes] = []
+        self.finished = False
 
     @property
     def is_playing(self) -> bool:
@@ -24,6 +25,9 @@ class FakeSpeaker:
 
     def write(self, pcm: bytes) -> None:
         self.written.append(pcm)
+
+    def finish(self) -> None:
+        self.finished = True
 
 
 def samples(pcm: bytes) -> list[int]:
@@ -131,3 +135,14 @@ def test_a_skipped_cue_does_not_deafen_anything():
     speaker.playing = True
     Cues(speaker, sample_rate=24000, mute=muted.append).ready()
     assert muted == [], "no cue was played, so there is nothing to ignore"
+
+
+def test_a_cue_declares_itself_complete():
+    """Otherwise a large pre-buffer holds it back waiting for audio that will never arrive.
+
+    Raising playback_buffer_ms to 300 on a Pi silenced every earcon this way: a cue is ~200ms, so
+    the buffer never filled and nothing played.
+    """
+    speaker = FakeSpeaker()
+    Cues(speaker, sample_rate=24000).ready()
+    assert speaker.finished, "the speaker can't know it's all there unless it's told"

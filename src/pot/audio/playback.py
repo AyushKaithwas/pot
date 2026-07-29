@@ -217,8 +217,11 @@ class Speaker:
     def _take_voice(self, wanted: int) -> bytes:
         """Pot's voice for this block, respecting the pre-buffer. Caller holds the lock."""
         if not self._streaming:
-            # Wait for enough audio to ride out the next late packet before starting.
-            if len(self._voice) < self._prebuffer_bytes:
+            # Wait for enough audio to ride out the next late packet before starting. Unless this
+            # is all there is: the pre-buffer absorbs jitter in audio still on its way, so holding
+            # a sound that's already complete just means never playing it. That silences every
+            # earcon as soon as the buffer is raised past the length of a cue.
+            if len(self._voice) < self._prebuffer_bytes and not self._draining:
                 return b""
             self._streaming = True
         taken = self._take(self._voice, wanted)

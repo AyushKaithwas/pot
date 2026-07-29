@@ -102,6 +102,9 @@ class Cues:
         if not self.enabled or self._speaker.is_playing:
             return False
         self._speaker.write(pcm)
+        # Complete the moment it's written, unlike a reply arriving over the network. Saying so is
+        # what lets it play without waiting for a pre-buffer's worth that will never come.
+        self._speaker.finish()
         if self._mute is not None:
             # Deafen the mic while this is audible. A cue is short, loud, and comes out of the
             # speaker the mic is sitting next to, so otherwise it arrives back as a user turn and
