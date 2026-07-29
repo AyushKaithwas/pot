@@ -7,7 +7,11 @@ model on your own voice is the fix that keeps this open source.
 
 from __future__ import annotations
 
+import importlib
 import logging
+import os
+import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -20,25 +24,37 @@ log = logging.getLogger(__name__)
 ENGINE = "openwakeword"
 FRAME_SAMPLES = 1280  # 80 ms at 16 kHz, the window openWakeWord's models expect
 INSTALL_HINT = "install the wake word extra: uv sync --extra wakeword"
+STDERR = 2
 
 
-def _quieten_onnxruntime() -> None:
-    """Stop onnxruntime warning about GPUs on a machine that has none.
+def _quiet_import(name: str):
+    """Import a module with its start-up chatter kept out of the journal.
 
-    It hunts for DRM devices at session creation and logs two warnings when it finds none, which on
-    a headless Pi means two lines of noise in the journal every time Pot starts.
+    openwakeword loads onnxruntime, which scans for DRM devices and logs two warnings when it finds
+    none: every headless Pi, every launch. That happens inside the C++ library before any Python
+    call can lower the log level, so catching the file descriptor is the only thing that works. The
+    text is kept at debug rather than discarded, so a genuine load failure is still diagnosable.
     """
-    try:
-        import onnxruntime
-
-        onnxruntime.set_default_logger_severity(3)  # errors only
-    except Exception:  # pragma: no cover - onnxruntime is optional
-        log.debug("could not quieten onnxruntime", exc_info=True)
+    if name in sys.modules:
+        return sys.modules[name]
+    with tempfile.TemporaryFile(mode="w+") as sink:
+        saved = os.dup(STDERR)
+        try:
+            os.dup2(sink.fileno(), STDERR)
+            module = importlib.import_module(name)
+        finally:
+            os.dup2(saved, STDERR)
+            os.close(saved)
+        sink.seek(0)
+        chatter = sink.read().strip()
+    if chatter:
+        log.debug("%s start-up said: %s", name, chatter)
+    return module
 
 
 def available() -> bool:
     try:
-        import openwakeword  # noqa: F401
+        _quiet_import("openwakeword")
     except ImportError:
         return False
     return True
@@ -48,7 +64,7 @@ def stock_models() -> list[str]:
     """The pre-trained triggers, e.g. hey_jarvis. Custom models come later as file paths."""
     if not available():
         return []
-    import openwakeword
+    openwakeword = _quiet_import("openwakeword")
 
     return sorted(openwakeword.MODELS)
 
@@ -60,7 +76,7 @@ def is_custom(model: str) -> bool:
 
 def feature_files() -> list[Path]:
     """The shared melspectrogram and embedding models every wake word needs."""
-    import openwakeword
+    openwakeword = _quiet_import("openwakeword")
 
     return [
         Path(feature["model_path"]).with_suffix(".onnx") for feature in openwakeword.FEATURE_MODELS.values()
@@ -69,7 +85,7 @@ def feature_files() -> list[Path]:
 
 def model_files(model: str) -> list[Path]:
     """The ONNX files a given wake word needs: its own, plus the shared feature extractors."""
-    import openwakeword
+    openwakeword = _quiet_import("openwakeword")
 
     if is_custom(model):
         return [Path(model).expanduser(), *feature_files()]
@@ -113,8 +129,7 @@ class OpenWakeWordEngine:
     def __init__(self, models: Sequence[str] | str = ("hey_mycroft",), *, download_if_missing: bool = True):
         if not available():
             raise WakeWordUnavailable(f"openWakeWord is not installed. {INSTALL_HINT}")
-        _quieten_onnxruntime()
-        from openwakeword.model import Model
+        Model = _quiet_import("openwakeword.model").Model
 
         sources = [models] if isinstance(models, str) else list(models)
         if not sources:
