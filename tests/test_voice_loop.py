@@ -14,7 +14,12 @@ from pot.config import AudioConfig, Settings
 from pot.runtime import Runtime
 from pot.voice.activity import ToolActivity
 from pot.voice.conversation import ConversationWindow
-from pot.voice.session import _finish_speaking, _listen_while_ringing, _should_reopen
+from pot.voice.session import (
+    _finish_speaking,
+    _how_to_talk,
+    _listen_while_ringing,
+    _should_reopen,
+)
 
 
 class FakeSpeaker:
@@ -250,3 +255,18 @@ async def test_a_reply_that_keeps_listening_says_nothing_extra():
     )
     assert gate.is_open
     assert not cues.closed_played
+
+
+def test_the_quit_key_is_only_offered_where_keys_are_read():
+    """Over `ssh host 'pot talk'` there's no terminal, so q reaches nothing and looks like a hang."""
+    wake_mode = AudioConfig(mode="wake_word")
+    assert "q = quit" in _how_to_talk(wake_mode, None, interactive=True)
+    assert "q = quit" not in _how_to_talk(wake_mode, None, interactive=False)
+    assert "ctrl-c" in _how_to_talk(wake_mode, None, interactive=False)
+
+
+def test_every_mode_says_how_to_stop():
+    for mode in ("push_to_talk", "always_on", "wake_word"):
+        for interactive in (True, False):
+            hint = _how_to_talk(AudioConfig(mode=mode), None, interactive=interactive)
+            assert "quit" in hint or "stop" in hint, f"{mode}, interactive={interactive}: {hint!r}"

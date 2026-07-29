@@ -114,7 +114,7 @@ async def run_voice(settings: Settings) -> None:
         f"[bold]{settings.assistant.name}[/bold] ready. Skills: {', '.join(skill.name for skill in skills)}"
     )
     console.print(f"mic {microphone.description} · speaker {speaker.description}")
-    console.print(f"[dim]{_how_to_talk(audio_config, wake)}[/dim]")
+    console.print(f"[dim]{_how_to_talk(audio_config, wake, interactive=sys.stdin.isatty())}[/dim]")
 
     session = await runner.run(model_config=settings.realtime_config())
     async with session, speaker, microphone:
@@ -186,14 +186,21 @@ def _build_wake_word(settings: Settings) -> WakeWord | None:
         raise RuntimeError(f"wake word mode needs a working wake word: {exc}") from exc
 
 
-def _how_to_talk(audio: AudioConfig, wake: WakeWord | None) -> str:
+def _how_to_talk(audio: AudioConfig, wake: WakeWord | None, *, interactive: bool = True) -> str:
+    """What to do, given where this is running.
+
+    Keys are only read when there's a terminal to read them from. Offering "q = quit" over
+    `ssh host \'pot talk\'`, or under systemd, promises a key nothing is listening for, and the
+    only way out then looks like there isn\'t one.
+    """
+    quit_hint = " · q = quit" if interactive else " · ctrl-c to stop"
     if wake is not None:
-        return f'say "{wake.spoken}" to start · q = quit'
+        return f'say "{wake.spoken}" to start{quit_hint}'
     if audio.mode == "always_on":
-        return "always-on mic · q = quit"
+        return f"always-on mic{quit_hint}"
     if audio.auto_reopen:
-        return "space = start talking, then just keep talking · q = quit"
-    return "space = talk, once per turn · q = quit"
+        return f"space = start talking, then just keep talking{quit_hint}"
+    return f"space = talk, once per turn{quit_hint}"
 
 
 async def _pump_microphone(
