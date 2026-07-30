@@ -5,8 +5,9 @@ chime through the speaker, getting slightly louder for the first few rounds, unt
 snoozed, or gives up after a few minutes so a forgotten alarm doesn't ring forever in an empty
 house.
 
-It writes to the same Speaker as everything else, so echo suppression sees it as a reference and
-the wake word can still hear "stop" over the top of it.
+It rings on the Speaker's chime channel: mixed over speech and music rather than queued behind
+them, still in the echo reference so the wake word can hear "stop" over the top, and silenced on
+dismissal without cutting off whatever Pot was saying.
 """
 
 from __future__ import annotations
@@ -65,8 +66,9 @@ class Ringer:
         self.label = ""
         if task is not None:
             task.cancel()
-        # Whatever is queued should not keep chiming after a dismissal.
-        self._speaker.flush()
+        # Only the chime: flushing the voice channel would cut Pot off mid-sentence, and the
+        # dismissal usually arrives while Pot is saying something.
+        self._speaker.stop_chime()
 
     async def wait(self) -> None:
         """For tests and shutdown: block until the ring finishes on its own."""
@@ -79,7 +81,7 @@ class Ringer:
         volume = START_VOLUME
         try:
             while loop.time() < deadline:
-                self._speaker.write(
+                self._speaker.write_chime(
                     tone(
                         CHIME_NOTES,
                         sample_rate=self._sample_rate,
@@ -88,9 +90,6 @@ class Ringer:
                         gap_seconds=0.05,
                     )
                 )
-                # Each chime is complete in itself, so don't let the resampler hold its last note
-                # back until the next one.
-                self._speaker.finish()
                 volume = min(MAX_VOLUME, volume + VOLUME_STEP)
                 await asyncio.sleep(GAP_SECONDS + NOTE_SECONDS * len(CHIME_NOTES))
         except asyncio.CancelledError:

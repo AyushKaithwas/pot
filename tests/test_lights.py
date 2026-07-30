@@ -248,3 +248,29 @@ def test_an_out_of_range_temperature_is_clamped_too():
 def test_a_normal_request_is_untouched_and_unremarked():
     change, note = LightChange(power=True, brightness_pct=10, color_temp_pct=0).resolved()
     assert (change.brightness_pct, change.color_temp_pct, note) == (10, 0, None)
+
+
+def test_a_deferred_change_lands_in_the_persistent_store(tmp_path):
+    """ "Lights off in ten minutes" used to be an in-memory task, gone with the process. As a
+    silent timer it survives a restart, shows in list_alarms, and cancels by voice."""
+    from pot.alarms import AlarmStore
+    from pot.config import LightDevice
+    from pot.runtime import Runtime, set_runtime
+    from pot.skills.lights import _defer
+    from pot.skills.time.service import TimeService
+
+    rt = Runtime(Settings())
+    set_runtime(rt)
+    service = rt.resource(
+        "time", lambda r: TimeService(r.settings, store=AlarmStore(tmp_path / "alarms.json"))
+    )
+    device = LightDevice(id="beta1", gwid="x", name="Beta 1")
+
+    spoken = _defer([device], LightChange(power=True, brightness_pct=30), after_seconds=600)
+
+    stored = AlarmStore(tmp_path / "alarms.json").sorted()
+    assert len(stored) == 1, "a fresh read of the file proves it was persisted, not just scheduled"
+    assert stored[0].ring is False, "a deferred change is a job with a time on it, not an alarm"
+    assert "set_lights" in stored[0].then and "Beta 1" in stored[0].then
+    assert "30" in spoken or "brightness" in spoken
+    assert service.pending(), "and the live service sees it too"

@@ -53,9 +53,15 @@ ANNOUNCE_PREAMBLE = (
 class Announcer:
     """Bridges the runtime's sync announce callback onto the session's async send_message."""
 
-    def __init__(self, session: RealtimeSession, window: ConversationWindow | None = None) -> None:
+    def __init__(
+        self,
+        session: RealtimeSession,
+        window: ConversationWindow | None = None,
+        requeue: Callable[[str], None] | None = None,
+    ) -> None:
         self._session = session
         self._window = window
+        self._requeue = requeue
         self._pending: set[asyncio.Task] = set()
 
     def __call__(self, text: str) -> None:
@@ -66,12 +72,17 @@ class Announcer:
             self._window.start()
         task = asyncio.create_task(self._session.send_message(f"{ANNOUNCE_PREAMBLE} {text}"))
         self._pending.add(task)
-        task.add_done_callback(self._finished)
+        task.add_done_callback(lambda done, text=text: self._finished(done, text))
 
-    def _finished(self, task: asyncio.Task) -> None:
+    def _finished(self, task: asyncio.Task, text: str) -> None:
         self._pending.discard(task)
-        if not task.cancelled() and task.exception() is not None:
-            log.warning("announcement failed: %s", task.exception())
+        if task.cancelled() or task.exception() is None:
+            return
+        log.warning("announcement failed: %s", task.exception())
+        if self._requeue is not None:
+            # Usually the session died mid-send. The words are not less true for it, so they go
+            # back in the queue the next connection drains.
+            self._requeue(text)
 
 
 async def run_voice(settings: Settings) -> None:
@@ -124,6 +135,12 @@ async def run_voice(settings: Settings) -> None:
     console.print(f"mic {microphone.description} · speaker {speaker.description}")
     console.print(f"[dim]{_how_to_talk(audio_config, wake, interactive=sys.stdin.isatty())}[/dim]")
 
+    # Anything announced while no connection is live waits here for the next one, instead of
+    # being a warning in a log nobody is reading. Bounded: if Pot has been offline long enough to
+    # accumulate more, the oldest announcements are stale anyway.
+    backlog: deque[str] = deque(maxlen=8)
+    runtime.on_announce(backlog.append)
+
     async with speaker, microphone:
         await _start_skill_services(runtime, skills)
         with raw_terminal() as interactive:
@@ -146,6 +163,7 @@ async def run_voice(settings: Settings) -> None:
                         window,
                         echo,
                         interactive,
+                        backlog,
                     )
                 except ConnectionClosed as exc:
                     log.info("connection closed: %s", exc)
@@ -157,6 +175,8 @@ async def run_voice(settings: Settings) -> None:
                     quitting = False
                 if quitting:
                     break
+                # Back to buffering until the next connection is live.
+                runtime.on_announce(backlog.append)
                 _reset_between_connections(gate, runtime, window, echo)
                 lasted = asyncio.get_running_loop().time() - started
                 delay = _reconnect_delay(delay, lasted)
@@ -184,11 +204,20 @@ async def _one_connection(
     window: ConversationWindow,
     echo: EchoSuppressor,
     interactive: bool,
+    backlog: deque[str],
 ) -> bool:
     """Hold one model connection open. True if the user asked to quit, False if it just ended."""
     session = await runner.run(model_config=settings.realtime_config())
     async with session:
-        runtime.on_announce(Announcer(session, window))
+        announcer = Announcer(session, window, requeue=backlog.append)
+        runtime.on_announce(announcer)
+        if backlog:
+            # Whatever fired while there was no connection: an alarm during the reconnect gap, or
+            # one that was overdue at startup. One message rather than several, because the API
+            # refuses to start a second reply while one is running.
+            held = "; ".join(backlog)
+            backlog.clear()
+            announcer(held)
         tasks = [
             asyncio.create_task(
                 _pump_microphone(session, microphone, gate, wake, runtime, cues, window, echo, speaker),

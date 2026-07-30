@@ -77,3 +77,23 @@ async def test_an_announcement_without_a_window_still_speaks():
     Announcer(session)("The pasta timer is up.")
     await asyncio.sleep(0)
     assert session.messages
+
+
+async def test_a_failed_announcement_goes_back_in_the_queue():
+    """The session dies mid-send during a reconnect; the words are not less true for it."""
+    requeued: list[str] = []
+    announcer = Announcer(FakeSession(fail=True), requeue=requeued.append)
+    announcer("Your timer is up.")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert requeued == ["Your timer is up."], "otherwise a reconnect eats the alarm's words"
+
+
+async def test_a_delivered_announcement_is_not_requeued():
+    requeued: list[str] = []
+    announcer = Announcer(FakeSession(), requeue=requeued.append)
+    announcer("Lamp off.")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert requeued == []

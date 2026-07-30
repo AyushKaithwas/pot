@@ -6,7 +6,6 @@ import logging
 
 from agents import function_tool
 
-from pot.runtime import runtime
 from pot.skills.base import Skill
 from pot.skills.lights.provider import LightChange, LightError
 from pot.skills.lights.service import get_service
@@ -73,15 +72,7 @@ async def set_lights(
         return "No matching lights."
 
     if after_seconds > 0:
-        names = ", ".join(d.spoken_name for d in devices)
-        label = f"{change.describe()} on {names}"
-
-        async def later() -> None:
-            outcomes = await service.apply(devices, change)
-            runtime().announce(f"Done: {label}. {'; '.join(o.describe() for o in outcomes)}")
-
-        job = runtime().scheduler.schedule(after_seconds, label, later)
-        return _with_note(f"Scheduled ({job.id}): {label} in {after_seconds} seconds.", note)
+        return _with_note(_defer(devices, change, after_seconds), note)
 
     outcomes = await service.apply(devices, change)
     return _with_note("\n".join(o.describe() for o in outcomes), note)
@@ -95,6 +86,26 @@ async def apply_scene(scene: str) -> str:
     except LightError as exc:
         return str(exc)
     return "\n".join(o.describe() for o in outcomes)
+
+
+def _defer(devices: list, change: LightChange, after_seconds: int) -> str:
+    """Park the change on the alarm store rather than an in-process task.
+
+    A plain asyncio timer dies with the process, so "lights off in ten minutes" would quietly
+    not happen across a restart or a crash. As a silent timer it persists, shows up in
+    list_alarms, and cancels by voice like anything else with a time on it.
+    """
+    from pot.skills.time.service import get_service as time_service
+
+    names = ", ".join(d.spoken_name for d in devices)
+    label = f"{change.describe()} on {names}"
+    alarm = time_service().add_timer(
+        after_seconds,
+        label=label,
+        then=f"use set_lights to apply {change.describe()} to {names}",
+        ring=False,
+    )
+    return f"Scheduled: {label} in {after_seconds} seconds (timer {alarm.id})."
 
 
 def _with_note(text: str, note: str | None) -> str:

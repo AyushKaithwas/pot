@@ -236,3 +236,34 @@ async def test_a_partial_stream_still_waits_for_the_buffer():
         await asyncio.sleep(0.2)
         # Under 10 rather than zero: the reference is resampled, and that rounds at the last bit.
         assert np.abs(np.frombuffer(speaker.drain_reference(), dtype=np.int16)).max() < 10
+
+
+async def test_a_chime_rings_over_speech_instead_of_waiting_for_it():
+    """An alarm that queues behind a sentence isn't ringing at the time it was set for."""
+    speaker = Speaker(sample_rate=24000, prebuffer_ms=0)
+    async with speaker:
+        speaker.write(_loud(4800, 1000))
+        speaker.write_chime(_loud(4800, 8000))
+        await asyncio.sleep(0.3)
+        heard = np.abs(np.frombuffer(speaker.drain_reference(), dtype=np.int16))
+
+    assert heard.max() > 6000, "the chime has to be audible immediately, not after the sentence"
+
+
+async def test_stopping_the_chime_leaves_speech_playing():
+    speaker = Speaker(sample_rate=24000, prebuffer_ms=0)
+    speaker.write(_loud(4800))
+    speaker.write_chime(_loud(4800))
+    speaker.stop_chime()
+    assert speaker.is_playing, "dismissing an alarm must not silence what Pot was saying"
+
+
+async def test_the_chime_is_not_ducked_with_the_music():
+    """DUCKED_GAIN applies while anything rings; ducking the ring itself would defeat it."""
+    speaker = Speaker(sample_rate=24000, prebuffer_ms=0)
+    async with speaker:
+        speaker.duck_music(True)
+        speaker.write_chime(_loud(4800, 8000))
+        await asyncio.sleep(0.3)
+        heard = np.abs(np.frombuffer(speaker.drain_reference(), dtype=np.int16))
+    assert heard.max() > 6000, f"peak {heard.max()}: the chime must ride at full level"

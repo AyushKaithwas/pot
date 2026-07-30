@@ -20,6 +20,7 @@ import threading
 
 import numpy as np
 import sounddevice as sd
+import soxr
 
 from pot.audio.devices import find_device, stream_rate
 from pot.audio.resample import StreamResampler
@@ -53,6 +54,10 @@ class Speaker:
         self._native_rate = self._pick_rate()
         self._voice = bytearray()
         self._music = bytearray()
+        # An alarm's chime. Its own channel because it overlaps the other two rather than queueing
+        # (the ring mustn't wait for a sentence to finish), and because dismissing it must silence
+        # the chime alone: flushing the voice channel cuts Pot off mid-word.
+        self._chime = bytearray()
         # What actually reached the device, at the device's rate. Taken from the mix rather than
         # from writes because writes run ahead of playback, and a reference that isn't lined up
         # with what the microphone is hearing is worse than none.
@@ -157,6 +162,23 @@ class Speaker:
             self._voice.extend(pcm16)
             self._draining = False
 
+    def write_chime(self, pcm16: bytes) -> None:
+        """One complete chime, mixed over whatever else is playing.
+
+        Each write is a whole sound, so it's converted in one shot: no streaming state, nothing
+        held back, nothing to finish().
+        """
+        if self._native_rate != self.source_rate:
+            samples = np.frombuffer(pcm16, dtype=np.int16)
+            pcm16 = soxr.resample(samples, self.source_rate, self._native_rate).tobytes()
+        with self._lock:
+            self._chime.extend(pcm16)
+
+    def stop_chime(self) -> None:
+        """Silence the ring without touching speech or music."""
+        with self._lock:
+            self._chime.clear()
+
     def write_music(self, pcm16: bytes) -> None:
         """Music, mixed under whatever Pot is saying rather than queued behind it."""
         if self._music_resampler is not None:
@@ -201,15 +223,19 @@ class Speaker:
         with self._lock:
             voice = self._take_voice(wanted)
             music = self._take(self._music, wanted)
+            chime = self._take(self._chime, wanted)
             gain = self._music_gain
-        outdata[:wanted] = _mix(voice, music, wanted, gain)
+        # The chime rides at full level: DUCKED_GAIN applies while anything rings, and ducking the
+        # ring itself would defeat it.
+        speech_and_chime = _mix(voice, chime, wanted, 1.0)
+        outdata[:wanted] = _mix(speech_and_chime, music, wanted, gain)
         with self._lock:
-            # Pot's own voice only, not the mix. Music belongs here in principle, but the
-            # suppressor subtracts per band, and against continuous music that removes the person
-            # talking along with it: measured, it goes from hearing the wake word at equal loudness
-            # to never hearing it at all. Cancelling music needs an adaptive filter, so until there
+            # Voice and chime, not the mix. Music belongs here in principle, but the suppressor
+            # subtracts per band, and against continuous music that removes the person talking
+            # along with it: measured, it goes from hearing the wake word at equal loudness to
+            # never hearing it at all. Cancelling music needs an adaptive filter, so until there
             # is one, the reference stays what the suppressor can actually handle.
-            self._reference.extend(voice.ljust(wanted, b"\x00"))
+            self._reference.extend(speech_and_chime)
             excess = len(self._reference) - self._reference_cap
             if excess > 0:
                 del self._reference[:excess]
