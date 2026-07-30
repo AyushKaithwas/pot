@@ -33,14 +33,11 @@ _INSTRUCTIONS = (
     "No markdown, no bullet lists, no preamble."
 )
 
-_client: AsyncOpenAI | None = None
-
 
 def _openai() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = AsyncOpenAI(**runtime().settings.openai_client_args())
-    return _client
+    # Parked on the runtime rather than a module global, so Runtime.close() closes it and a new
+    # runtime (tests, config reload) never sees a client built from old settings.
+    return runtime().resource("openai", lambda rt: AsyncOpenAI(**rt.settings.openai_client_args()))
 
 
 @function_tool

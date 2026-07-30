@@ -147,7 +147,10 @@ class TimeService:
             return  # already making noise; one at a time is enough
         self._ringing = alarm
         if self.ringer is not None:
-            self.ringer.start(name)
+            # If it rings itself out unanswered, the dismissal has to happen anyway: otherwise
+            # "something is ringing" outlives the sound, holding the mic open and music ducked
+            # until a restart.
+            self.ringer.start(name, on_gave_up=self.dismiss)
         self._set_quiet(True)
         self._say(_spoken(alarm))
 

@@ -18,11 +18,14 @@ def test_the_unit_runs_pot_and_restarts_it():
     assert "talk" in unit
 
 
-def test_the_unit_waits_for_network_and_sound():
-    """Starting before either exists is the classic way a boot-time assistant comes up deaf."""
+def test_the_unit_survives_racing_boot_by_restarting():
+    """A user unit can't order against network-online.target: that target lives in the system
+    manager, so the old After= line was a promise systemd silently ignored. What actually gets
+    Pot up after a power cut is the restart loop riding out the failures until the network is."""
     unit = service.render_unit()
-    assert "network-online.target" in unit
-    assert "sound.target" in unit
+    assert "After=network-online.target" not in unit, "an inert ordering reads as a working one"
+    assert "Restart=always" in unit
+    assert "RestartSec=" in unit
 
 
 def test_logs_go_to_the_journal_since_there_is_no_terminal():

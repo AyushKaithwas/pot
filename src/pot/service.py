@@ -18,9 +18,10 @@ UNIT_TEMPLATE = """\
 [Unit]
 Description={description}
 Documentation=https://github.com/{repo}
-# The wake word needs models on disk and the realtime API needs the network, so don't race boot.
-After=network-online.target sound.target
-Wants=network-online.target
+# Ordering targets like network-online.target live in the system manager, not the user manager
+# this unit runs in, so they can't be waited on here. Racing boot is survived instead: a start
+# before the network is up fails, and Restart brings it back a few seconds later.
+After=default.target
 
 [Service]
 Type=simple

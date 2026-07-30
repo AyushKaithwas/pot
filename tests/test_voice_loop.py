@@ -16,10 +16,13 @@ from pot.runtime import Runtime
 from pot.voice.activity import ToolActivity
 from pot.voice.conversation import ConversationWindow
 from pot.voice.session import (
+    RECONNECT_DELAY_CAP_SECONDS,
+    RECONNECT_DELAY_SECONDS,
     _finish_speaking,
     _how_to_talk,
     _is_expected,
     _listen_while_ringing,
+    _reconnect_delay,
     _reset_between_connections,
     _should_reopen,
 )
@@ -299,3 +302,19 @@ def test_reconnecting_starts_from_waiting_not_mid_conversation():
     assert not runtime.listening
     assert not window.open
     assert echo.process(b"\x03\x04" * 480) == b"\x03\x04" * 480, "a stale reference is worse than none"
+
+
+def test_reconnect_backs_off_while_the_network_is_down():
+    """Connections dying at birth mean a dead network; retrying every 2s helps nobody."""
+    delay = RECONNECT_DELAY_SECONDS
+    seen = []
+    for _ in range(6):
+        delay = _reconnect_delay(delay, connection_lasted=0.1)
+        seen.append(delay)
+    assert seen[0] > RECONNECT_DELAY_SECONDS, "a failing connection grows the pause"
+    assert max(seen) <= RECONNECT_DELAY_CAP_SECONDS, "but never past the cap"
+
+
+def test_reconnect_is_prompt_again_once_a_connection_survives():
+    """The hourly expiry is a healthy connection ending, so the next one starts in seconds."""
+    assert _reconnect_delay(30.0, connection_lasted=3600.0) == RECONNECT_DELAY_SECONDS

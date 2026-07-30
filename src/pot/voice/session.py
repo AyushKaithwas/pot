@@ -38,8 +38,11 @@ log = logging.getLogger(__name__)
 # Announcements are mostly things to say, but an alarm can carry something to do ("play Wavy when
 # it goes off"), and that only works if the model is told it's allowed to act on one.
 # Long enough not to hammer the API if it is refusing connections, short enough that an hourly
-# reconnect is not a gap anyone notices.
+# reconnect is not a gap anyone notices. Grows toward the cap while connections keep dying young,
+# which is what a dead network looks like.
 RECONNECT_DELAY_SECONDS = 2.0
+RECONNECT_DELAY_CAP_SECONDS = 30.0
+HEALTHY_CONNECTION_SECONDS = 30.0
 
 ANNOUNCE_PREAMBLE = (
     "System notice. If it asks you to do something, do it now with your tools. "
@@ -127,7 +130,9 @@ async def run_voice(settings: Settings) -> None:
             # The API ends a session after an hour, and a box in the corner has to outlive that,
             # so the connection is the only thing that restarts. Devices, skills and pending
             # alarms all live outside this loop and carry across.
+            delay = RECONNECT_DELAY_SECONDS
             while True:
+                started = asyncio.get_running_loop().time()
                 try:
                     quitting = await _one_connection(
                         runner,
@@ -145,11 +150,18 @@ async def run_voice(settings: Settings) -> None:
                 except ConnectionClosed as exc:
                     log.info("connection closed: %s", exc)
                     quitting = False
+                except (OSError, TimeoutError) as exc:
+                    # Wi-Fi dropping or DNS not answering is routine for an appliance; a bad API
+                    # key is not, and that arrives as a rejected handshake, which still crashes.
+                    log.warning("connection failed: %s", exc)
+                    quitting = False
                 if quitting:
                     break
                 _reset_between_connections(gate, runtime, window, echo)
-                console.print("[dim]reconnecting[/dim]")
-                await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+                lasted = asyncio.get_running_loop().time() - started
+                delay = _reconnect_delay(delay, lasted)
+                console.print(f"[dim]reconnecting in {delay:g}s[/dim]")
+                await asyncio.sleep(delay)
     runtime.on_announce(None)
     if speaker.underruns:
         console.print(
@@ -198,6 +210,17 @@ async def _one_connection(
             with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
                 task.result()
     return quitting
+
+
+def _reconnect_delay(current: float, connection_lasted: float) -> float:
+    """The next pause: patient while the network is down, prompt once it is back.
+
+    An hourly expiry reconnects in seconds. A connection that keeps dying at birth backs off
+    toward the cap, because retrying a dead network every two seconds helps nobody.
+    """
+    if connection_lasted >= HEALTHY_CONNECTION_SECONDS:
+        return RECONNECT_DELAY_SECONDS
+    return min(RECONNECT_DELAY_CAP_SECONDS, current * 2)
 
 
 def _reset_between_connections(
@@ -411,7 +434,7 @@ async def _pump_events(
                 and event.data.type == "input_audio_timeout_triggered"
                 and wake is not None
             ):
-                _stop_listening(gate, runtime, cues, f'back to "{wake.model_name}"')
+                _stop_listening(gate, runtime, cues, f'back to "{wake.spoken}"')
             elif event.type == "error":
                 if _is_expected(event.error):
                     log.debug("expected: %s", event.error)
@@ -422,10 +445,12 @@ async def _pump_events(
             elif event.type == "guardrail_tripped":
                 console.print("[yellow]guardrail tripped[/yellow]")
     finally:
-        for task in (ticker, watcher):
+        # reopen included: left running, it would fire after the reconnect reset and open the mic
+        # into a fresh session that is supposed to be waiting for the wake word.
+        for task in (ticker, watcher, reopen):
             if task is not None:
                 task.cancel()
-        await asyncio.gather(*(t for t in (ticker, watcher) if t is not None), return_exceptions=True)
+        await asyncio.gather(*(t for t in (ticker, watcher, reopen) if t is not None), return_exceptions=True)
         activity.stop()
 
 

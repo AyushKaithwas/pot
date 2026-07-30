@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 from pot.audio.cues import tone
 from pot.audio.playback import Speaker
@@ -39,16 +40,24 @@ class Ringer:
         self._sample_rate = sample_rate
         self._max_seconds = max_seconds
         self._task: asyncio.Task | None = None
+        self._on_gave_up: Callable[[], None] | None = None
         self.label = ""
 
     @property
     def ringing(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    def start(self, label: str = "") -> None:
+    def start(self, label: str = "", *, on_gave_up: Callable[[], None] | None = None) -> None:
+        """Ring until stopped. `on_gave_up` fires only if the ring times out unanswered.
+
+        Whoever started the ring holds state that says "something is ringing", and without this
+        callback that state outlives the noise: the mic stays open, music stays ducked, and the
+        next alarm finds the slot occupied.
+        """
         if self.ringing:
             return
         self.label = label
+        self._on_gave_up = on_gave_up
         self._task = asyncio.create_task(self._ring(), name="ringer")
 
     def stop(self) -> None:
@@ -89,3 +98,5 @@ class Ringer:
         finally:
             self.label = ""
         log.info("alarm rang for %.0fs with no response", self._max_seconds)
+        if self._on_gave_up is not None:
+            self._on_gave_up()

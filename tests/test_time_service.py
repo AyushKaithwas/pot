@@ -20,9 +20,11 @@ class FakeRinger:
     def __init__(self) -> None:
         self.started = ""
         self.stopped = False
+        self.on_gave_up = None
 
-    def start(self, label: str) -> None:
+    def start(self, label: str, *, on_gave_up=None) -> None:
         self.started = label
+        self.on_gave_up = on_gave_up
 
     def stop(self) -> None:
         self.stopped = True
@@ -100,3 +102,21 @@ def test_what_to_do_survives_a_restart(parts, tmp_path: Path):
     service, _, _ = parts
     service.add_timer(60, "alarm", then="play the news")
     assert AlarmStore(tmp_path / "alarms.json").sorted()[0].then == "play the news"
+
+
+def test_an_unanswered_alarm_clears_itself_when_the_ring_gives_up(parts):
+    """The ring times out after a few minutes; the "something is ringing" state must not outlive it.
+
+    Left set, the mic stays open (the idle closer keeps the window alive while an alarm rings),
+    music stays ducked, and the next alarm finds the slot occupied. Until a restart.
+    """
+    service, ringer, _ = parts
+    alarm = service.add_timer(1, "unanswered")
+    service._check(alarm.due_at + timedelta(seconds=1))
+    assert service.ringing is not None
+
+    assert ringer.on_gave_up is not None, "the ringer must be told what to do on timeout"
+    ringer.on_gave_up()
+
+    assert service.ringing is None, "the slot is free for the next alarm"
+    assert ringer.stopped, "and the ring state is fully torn down"
