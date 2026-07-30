@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from pot.audio.capture import MicrophoneGate
+from pot.audio.echo import EchoSuppressor
 from pot.config import AudioConfig, Settings
 from pot.runtime import Runtime
 from pot.voice.activity import ToolActivity
@@ -17,7 +18,9 @@ from pot.voice.conversation import ConversationWindow
 from pot.voice.session import (
     _finish_speaking,
     _how_to_talk,
+    _is_expected,
     _listen_while_ringing,
+    _reset_between_connections,
     _should_reopen,
 )
 
@@ -270,3 +273,29 @@ def test_every_mode_says_how_to_stop():
         for interactive in (True, False):
             hint = _how_to_talk(AudioConfig(mode=mode), None, interactive=interactive)
             assert "quit" in hint or "stop" in hint, f"{mode}, interactive={interactive}: {hint!r}"
+
+
+def test_a_session_expiring_is_not_reported_as_a_fault():
+    """The API ends a session after an hour. Pot reconnects, so buzzing at the user is crying wolf."""
+    assert _is_expected("RealtimeError(code='session_expired')")
+    assert _is_expected("conversation_already_has_active_response")
+    assert not _is_expected("RealtimeError(code='invalid_api_key')")
+    assert not _is_expected("something nobody has seen before")
+
+
+def test_reconnecting_starts_from_waiting_not_mid_conversation():
+    """A fresh session has no idea a conversation was in progress, so don't stream the room at it."""
+    gate = MicrophoneGate(open_at_start=True)
+    runtime = Runtime(Settings())
+    runtime.set_listening(True)
+    window = ConversationWindow(15)
+    window.start()
+    echo = EchoSuppressor(24000)
+    echo.playback(b"\x01\x02" * 480)
+
+    _reset_between_connections(gate, runtime, window, echo)
+
+    assert not gate.is_open
+    assert not runtime.listening
+    assert not window.open
+    assert echo.process(b"\x03\x04" * 480) == b"\x03\x04" * 480, "a stale reference is worse than none"

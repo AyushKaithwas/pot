@@ -15,6 +15,7 @@ from collections import deque
 from collections.abc import Callable, Iterable
 
 from agents.realtime import RealtimeRunner, RealtimeSession
+from websockets.exceptions import ConnectionClosed
 
 from pot.audio.capture import BLOCK_MILLISECONDS, Microphone, MicrophoneGate
 from pot.audio.cues import Cues
@@ -36,6 +37,10 @@ log = logging.getLogger(__name__)
 
 # Announcements are mostly things to say, but an alarm can carry something to do ("play Wavy when
 # it goes off"), and that only works if the model is told it's allowed to act on one.
+# Long enough not to hammer the API if it is refusing connections, short enough that an hourly
+# reconnect is not a gap anyone notices.
+RECONNECT_DELAY_SECONDS = 2.0
+
 ANNOUNCE_PREAMBLE = (
     "System notice. If it asks you to do something, do it now with your tools. "
     "Then tell the user, briefly and in your own words:"
@@ -116,10 +121,62 @@ async def run_voice(settings: Settings) -> None:
     console.print(f"mic {microphone.description} · speaker {speaker.description}")
     console.print(f"[dim]{_how_to_talk(audio_config, wake, interactive=sys.stdin.isatty())}[/dim]")
 
-    session = await runner.run(model_config=settings.realtime_config())
-    async with session, speaker, microphone:
-        runtime.on_announce(Announcer(session, window))
+    async with speaker, microphone:
         await _start_skill_services(runtime, skills)
+        with raw_terminal() as interactive:
+            # The API ends a session after an hour, and a box in the corner has to outlive that,
+            # so the connection is the only thing that restarts. Devices, skills and pending
+            # alarms all live outside this loop and carry across.
+            while True:
+                try:
+                    quitting = await _one_connection(
+                        runner,
+                        settings,
+                        speaker,
+                        microphone,
+                        gate,
+                        wake,
+                        runtime,
+                        cues,
+                        window,
+                        echo,
+                        interactive,
+                    )
+                except ConnectionClosed as exc:
+                    log.info("connection closed: %s", exc)
+                    quitting = False
+                if quitting:
+                    break
+                _reset_between_connections(gate, runtime, window, echo)
+                console.print("[dim]reconnecting[/dim]")
+                await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+    runtime.on_announce(None)
+    if speaker.underruns:
+        console.print(
+            f"[yellow]{speaker.underruns} playback underrun(s)[/yellow] — audio arrived later "
+            "than it was needed, heard as a click mid-word. Check the network and CPU load."
+        )
+    console.print(runtime.usage.summary())
+    await runtime.close()
+
+
+async def _one_connection(
+    runner: RealtimeRunner,
+    settings: Settings,
+    speaker: Speaker,
+    microphone: Microphone,
+    gate: MicrophoneGate,
+    wake: WakeWord | None,
+    runtime: Runtime,
+    cues: Cues,
+    window: ConversationWindow,
+    echo: EchoSuppressor,
+    interactive: bool,
+) -> bool:
+    """Hold one model connection open. True if the user asked to quit, False if it just ended."""
+    session = await runner.run(model_config=settings.realtime_config())
+    async with session:
+        runtime.on_announce(Announcer(session, window))
         tasks = [
             asyncio.create_task(
                 _pump_microphone(session, microphone, gate, wake, runtime, cues, window, echo, speaker),
@@ -129,24 +186,32 @@ async def run_voice(settings: Settings) -> None:
                 _pump_events(session, speaker, gate, runtime, cues, wake, window), name="events"
             ),
         ]
-        with raw_terminal() as interactive:
-            if interactive:
-                tasks.append(asyncio.create_task(_watch_keys(session, gate, cues), name="keys"))
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if interactive:
+            tasks.append(asyncio.create_task(_watch_keys(session, gate, cues), name="keys"))
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
+        quitting = any(task.get_name() == "keys" for task in done)
         for task in done:
-            with contextlib.suppress(asyncio.CancelledError):
+            # A closed connection is how a session ends, not a failure to report.
+            with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
                 task.result()
-    runtime.on_announce(None)
-    if speaker.underruns:
-        console.print(
-            f"[yellow]{speaker.underruns} playback underrun(s)[/yellow] — audio arrived later "
-            "than it was needed, heard as a click mid-word. Check the network and CPU load."
-        )
-    console.print(runtime.usage.summary())
-    await runtime.close()
+    return quitting
+
+
+def _reset_between_connections(
+    gate: MicrophoneGate, runtime: Runtime, window: ConversationWindow, echo: EchoSuppressor
+) -> None:
+    """Start the next connection waiting, not mid-conversation.
+
+    Carrying an open gate across would stream the room into a session that has no idea a
+    conversation was in progress, and the suppressor's reference belongs to audio already played.
+    """
+    gate.close()
+    runtime.set_listening(False)
+    window.stop()
+    echo.reset()
 
 
 async def _start_skill_services(runtime: Runtime, skills: Iterable[object]) -> None:
@@ -348,10 +413,8 @@ async def _pump_events(
             ):
                 _stop_listening(gate, runtime, cues, f'back to "{wake.model_name}"')
             elif event.type == "error":
-                if _is_expected_overlap(event.error):
-                    # Talking over a long tool call is a feature, and the API rejecting the extra
-                    # turn is how it declines to answer twice at once. Nothing broke.
-                    log.debug("overlapping turn declined: %s", event.error)
+                if _is_expected(event.error):
+                    log.debug("expected: %s", event.error)
                     continue
                 # Nothing to read on a screenless device, so the buzz is the whole message.
                 console.print(f"[red]error[/red] {event.error}")
@@ -366,13 +429,14 @@ async def _pump_events(
         activity.stop()
 
 
-def _is_expected_overlap(error: object) -> bool:
-    """Whether an error is just the API refusing to start a second reply while one is running.
+# Neither of these is a fault. Talking over a long tool call is a feature, and the API declining a
+# second reply is how it says so; an hour-long session ending is the documented limit, and Pot
+# reconnects. On a device whose only error channel is a buzz, reporting either would cry wolf.
+EXPECTED_ERRORS = ("conversation_already_has_active_response", "session_expired")
 
-    Async tool calls exist so you can keep talking while Pot works, so a turn landing mid-reply is
-    normal. Showing it as an error, on a device whose only error channel is a buzz, would cry wolf.
-    """
-    return "conversation_already_has_active_response" in str(error)
+
+def _is_expected(error: object) -> bool:
+    return any(code in str(error) for code in EXPECTED_ERRORS)
 
 
 def _record_usage(event: object, runtime: Runtime) -> None:
