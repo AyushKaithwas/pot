@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
@@ -153,19 +154,29 @@ def _spoken_repeat(repeat: Repeat) -> str:
 
 @dataclass
 class AlarmStore:
-    """The set of pending timers and alarms, saved after every change."""
+    """The set of pending timers and alarms, saved after every change.
+
+    Two processes can hold this file at once: the running assistant, and `pot alarms cancel` from
+    a shell. Reads check the file's mtime and reload when someone else wrote it, so a CLI
+    cancellation reaches the daemon within a tick instead of being resurrected by its stale
+    memory. Writes are last-writer-wins, which for a device with one household is livable; real
+    concurrent writing would need a lock file.
+    """
 
     path: Path
     alarms: dict[str, Alarm] = field(default_factory=dict)
+    _mtime: int | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.load()
 
     def load(self) -> None:
         if not self.path.exists():
+            self._mtime = None
             return
         try:
             raw = json.loads(self.path.read_text())
+            self._mtime = self.path.stat().st_mtime_ns
         except (json.JSONDecodeError, OSError):
             log.warning("could not read alarms at %s; starting empty", self.path)
             return
@@ -177,12 +188,44 @@ class AlarmStore:
                 continue
             self.alarms[alarm.id] = alarm
 
+    def _refresh(self) -> None:
+        """Pick up changes another process made to the file."""
+        try:
+            mtime = self.path.stat().st_mtime_ns
+        except FileNotFoundError:
+            if self.alarms:
+                # Someone cleared the file out from under us; firing from memory would resurrect
+                # alarms the user just cancelled.
+                self.alarms.clear()
+            self._mtime = None
+            return
+        if mtime != self._mtime:
+            self.alarms.clear()
+            self.load()
+
     def save(self) -> None:
+        """Write the whole store, atomically.
+
+        A plain overwrite truncates first, so a power cut mid-write leaves invalid JSON and the
+        next start treats it as an empty store: every alarm gone. Writing beside the file and
+        renaming over it means the store is always either the old state or the new one.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"alarms": [alarm.to_json() for alarm in self.sorted()]}
-        self.path.write_text(json.dumps(payload, indent=2) + "\n")
+        # Straight from memory, deliberately not via sorted(): a save is the authoritative state
+        # being written out, and refreshing against the file it is about to replace once wiped
+        # the very alarms being saved.
+        ordered = sorted(self.alarms.values(), key=lambda alarm: alarm.due_at)
+        payload = {"alarms": [alarm.to_json() for alarm in ordered]}
+        scratch = self.path.with_suffix(".json.tmp")
+        with open(scratch, "w") as handle:
+            handle.write(json.dumps(payload, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(scratch, self.path)
+        self._mtime = self.path.stat().st_mtime_ns
 
     def sorted(self) -> list[Alarm]:
+        self._refresh()
         return sorted(self.alarms.values(), key=lambda alarm: alarm.due_at)
 
     def add(

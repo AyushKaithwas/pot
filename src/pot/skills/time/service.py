@@ -132,6 +132,12 @@ class TimeService:
             self._fire(alarm, now)
 
     def _fire(self, alarm: Alarm, now: datetime) -> None:
+        if alarm.ring and self._ringing is not None:
+            # One ring at a time, but the second alarm is not settled: it stays due, and fires the
+            # moment the current one is dismissed. Settling it here removed it from the store
+            # without it ever making a sound, which is the one thing an alarm must never do.
+            return
+
         # Settle first: if anything below throws, the alarm has still moved on and won't spin.
         self.store.settle(alarm, now)
         name = alarm.label or alarm.kind.value
@@ -142,9 +148,6 @@ class TimeService:
             # is the whole point. Staying quiet also keeps music unducked, in case the job is music.
             self._say(_spoken(alarm))
             return
-
-        if self._ringing is not None:
-            return  # already making noise; one at a time is enough
         self._ringing = alarm
         if self.ringer is not None:
             # If it rings itself out unanswered, the dismissal has to happen anyway: otherwise

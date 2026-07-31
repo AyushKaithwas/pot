@@ -51,38 +51,72 @@ ANNOUNCE_PREAMBLE = (
 
 
 class Announcer:
-    """Bridges the runtime's sync announce callback onto the session's async send_message."""
+    """Delivers announcements to the session, one at a time, when Pot isn't mid-reply.
+
+    Sending while a response is active gets conversation_already_has_active_response back: the
+    words land in the history but nothing speaks them until the user happens to talk again, which
+    for "turn the lights off in ten minutes" means the lights don't change. So delivery waits for
+    quiet, and a send that fails outright puts its text back for the next connection.
+    """
 
     def __init__(
         self,
         session: RealtimeSession,
         window: ConversationWindow | None = None,
         requeue: Callable[[str], None] | None = None,
+        busy: Callable[[], bool] | None = None,
     ) -> None:
         self._session = session
         self._window = window
         self._requeue = requeue
-        self._pending: set[asyncio.Task] = set()
+        self._busy = busy or (lambda: False)
+        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        # The item the worker has dequeued but not yet delivered. Held here rather than in a
+        # local so that close() can hand it on: cancellation mid-wait would otherwise eat it.
+        self._carrying: str | None = None
+        self._worker = asyncio.create_task(self._deliver(), name="announcer")
 
     def __call__(self, text: str) -> None:
-        if self._window is not None:
-            # Pot started this exchange, so it listens for the answer. Without this the mic stays
-            # shut after an announcement and the only way back in is the wake word, which is
-            # exactly what an announcement like "now playing" has just made hard to hear.
-            self._window.start()
-        task = asyncio.create_task(self._session.send_message(f"{ANNOUNCE_PREAMBLE} {text}"))
-        self._pending.add(task)
-        task.add_done_callback(lambda done, text=text: self._finished(done, text))
+        self._queue.put_nowait(text)
 
-    def _finished(self, task: asyncio.Task, text: str) -> None:
-        self._pending.discard(task)
-        if task.cancelled() or task.exception() is None:
-            return
-        log.warning("announcement failed: %s", task.exception())
-        if self._requeue is not None:
-            # Usually the session died mid-send. The words are not less true for it, so they go
-            # back in the queue the next connection drains.
-            self._requeue(text)
+    async def _deliver(self) -> None:
+        while True:
+            self._carrying = await self._queue.get()
+            text = self._carrying
+            while self._busy():
+                await asyncio.sleep(0.25)
+            if self._window is not None:
+                # Pot started this exchange, so it listens for the answer afterwards. Without
+                # this the mic stays shut and the only way back in is the wake word, which is
+                # exactly what an announcement like "now playing" has just made hard to hear.
+                self._window.start()
+            try:
+                await self._session.send_message(f"{ANNOUNCE_PREAMBLE} {text}")
+            except Exception as exc:
+                log.warning("announcement failed: %s", exc)
+                if self._requeue is not None:
+                    self._requeue(text)
+                self._carrying = None
+                continue
+            self._carrying = None
+            if not self._queue.empty():
+                # Give the reply time to register as busy, or the next item races it and gets
+                # refused. Only worth waiting for when something is actually behind it.
+                for _ in range(20):
+                    if self._busy():
+                        break
+                    await asyncio.sleep(0.1)
+
+    def close(self) -> None:
+        """Stop delivering, putting anything unsent back for whoever takes over."""
+        self._worker.cancel()
+        if self._carrying is not None and self._requeue is not None:
+            self._requeue(self._carrying)
+            self._carrying = None
+        while not self._queue.empty():
+            text = self._queue.get_nowait()
+            if self._requeue is not None:
+                self._requeue(text)
 
 
 async def run_voice(settings: Settings) -> None:
@@ -209,12 +243,18 @@ async def _one_connection(
     """Hold one model connection open. True if the user asked to quit, False if it just ended."""
     session = await runner.run(model_config=settings.realtime_config())
     async with session:
-        announcer = Announcer(session, window, requeue=backlog.append)
+        activity = ToolActivity()
+        announcer = Announcer(
+            session,
+            window,
+            requeue=backlog.append,
+            # Speaking covers a reply in flight; a running tool means one is about to be.
+            busy=lambda: runtime.speaking or activity.busy,
+        )
         runtime.on_announce(announcer)
         if backlog:
             # Whatever fired while there was no connection: an alarm during the reconnect gap, or
-            # one that was overdue at startup. One message rather than several, because the API
-            # refuses to start a second reply while one is running.
+            # one that was overdue at startup. One message rather than several.
             held = "; ".join(backlog)
             backlog.clear()
             announcer(held)
@@ -224,16 +264,18 @@ async def _one_connection(
                 name="mic",
             ),
             asyncio.create_task(
-                _pump_events(session, speaker, gate, runtime, cues, wake, window), name="events"
+                _pump_events(session, speaker, gate, runtime, cues, wake, window, activity),
+                name="events",
             ),
         ]
         if interactive:
-            tasks.append(asyncio.create_task(_watch_keys(session, gate, cues), name="keys"))
+            tasks.append(asyncio.create_task(_watch_keys(session, gate, cues, runtime), name="keys"))
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
         quitting = any(task.get_name() == "keys" for task in done)
+        announcer.close()
         for task in done:
             # A closed connection is how a session ends, not a failure to report.
             with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
@@ -398,9 +440,10 @@ async def _pump_events(
     cues: Cues,
     wake: WakeWord | None = None,
     window: ConversationWindow | None = None,
+    activity: ToolActivity | None = None,
 ) -> None:
     transcripts = TranscriptPrinter()
-    activity = ToolActivity()
+    activity = activity if activity is not None else ToolActivity()
     ticker = asyncio.create_task(_tick_while_working(activity, cues), name="working-cue")
     watcher = (
         asyncio.create_task(_close_when_idle(gate, runtime, cues, wake, window), name="idle")
@@ -607,15 +650,19 @@ async def _finish_speaking(
         console.print("[green]listening[/green]")
 
 
-async def _watch_keys(session: RealtimeSession, gate: MicrophoneGate, cues: Cues) -> None:
+async def _watch_keys(session: RealtimeSession, gate: MicrophoneGate, cues: Cues, runtime: Runtime) -> None:
     async for key in keypresses():
         if key in {"q", "\x03", "\x04"}:
             return
         if key in {" ", "\r", "\n"}:
             if gate.toggle():
+                # Published, not just toggled: music ducks on the listening signal, and a
+                # push-to-talk mic that doesn't announce itself leaves the song talking over you.
+                runtime.set_listening(True)
                 cues.ready()
                 console.print("[green]listening[/green]")
             else:
+                runtime.set_listening(False)
                 cues.closed()
                 console.print("[dim]mic off[/dim]")
 

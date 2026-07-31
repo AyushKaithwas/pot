@@ -120,3 +120,21 @@ def test_an_unanswered_alarm_clears_itself_when_the_ring_gives_up(parts):
 
     assert service.ringing is None, "the slot is free for the next alarm"
     assert ringer.stopped, "and the ring state is fully torn down"
+
+
+def test_a_second_simultaneous_alarm_waits_instead_of_vanishing(parts):
+    """Two alarms due together: the old code settled the second while the first rang, deleting it
+    from the store without it ever making a sound."""
+    service, ringer, said = parts
+    first = service.add_timer(1, "first")
+    second = service.add_timer(1, "second")
+    moment = max(first.due_at, second.due_at) + timedelta(seconds=1)
+
+    service._check(moment)
+    assert service.ringing.label == "first"
+    assert [a.label for a in service.pending()] == ["second"], "still owed a ring"
+
+    service.dismiss()
+    service._check(moment + timedelta(seconds=1))
+    assert service.ringing.label == "second", "it fires as soon as the first is dealt with"
+    assert said[-1] == "The second timer is up."

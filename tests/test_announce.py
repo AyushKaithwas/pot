@@ -97,3 +97,30 @@ async def test_a_delivered_announcement_is_not_requeued():
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert requeued == []
+
+
+async def test_delivery_waits_until_pot_is_quiet():
+    """Sent mid-reply, the API refuses the response and the words sit unspoken in the history:
+    "lights off in ten minutes" then only happens whenever the user next says something."""
+    session = FakeSession()
+    talking = True
+    announcer = Announcer(session, busy=lambda: talking)
+    announcer("The lights timer is due.")
+
+    await asyncio.sleep(0.3)
+    assert session.messages == [], "nothing goes out while a reply is in flight"
+
+    talking = False
+    await asyncio.sleep(0.4)
+    assert len(session.messages) == 1, "and it goes out as soon as Pot is quiet"
+
+
+async def test_closing_hands_unsent_announcements_to_the_next_connection():
+    requeued: list[str] = []
+    announcer = Announcer(FakeSession(), busy=lambda: True, requeue=requeued.append)
+    announcer("first")
+    announcer("second")
+    await asyncio.sleep(0.1)
+
+    announcer.close()
+    assert requeued == ["first", "second"], "a dying connection must not eat what it never sent"

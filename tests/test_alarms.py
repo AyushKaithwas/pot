@@ -136,3 +136,30 @@ def test_descriptions_are_meant_to_be_said_out_loud(store: AlarmStore):
 
 def test_nothing_set_says_so():
     assert describe_all([], WEDNESDAY) == "Nothing is set."
+
+
+def test_a_cancellation_from_another_process_is_seen(store: AlarmStore, tmp_path: Path):
+    """`pot alarms cancel` runs in its own process. The daemon's next read has to notice, or it
+    fires the cancelled alarm from memory and then writes it back into the file."""
+    alarm = store.add(Kind.ALARM, WEDNESDAY, label="cancelled elsewhere")
+
+    other = AlarmStore(tmp_path / "alarms.json")
+    other.remove(alarm.id)
+
+    assert store.due(WEDNESDAY) == [], "the daemon must not fire what the CLI cancelled"
+    assert store.sorted() == []
+
+
+def test_an_addition_from_another_process_is_seen(store: AlarmStore, tmp_path: Path):
+    other = AlarmStore(tmp_path / "alarms.json")
+    other.add(Kind.TIMER, WEDNESDAY, label="from the CLI")
+    assert [alarm.label for alarm in store.sorted()] == ["from the CLI"]
+
+
+def test_a_save_is_all_or_nothing(store: AlarmStore, tmp_path: Path):
+    """A power cut mid-write must leave the old state, not truncated JSON that reads as empty."""
+    store.add(Kind.TIMER, WEDNESDAY, label="survivor")
+    assert not list(tmp_path.glob("*.tmp")), "the scratch file must not linger"
+    # The write went through a rename, so at no point did the real file hold partial JSON. The
+    # strongest cheap assertion: the file parses and holds exactly the saved state.
+    assert [alarm.label for alarm in AlarmStore(tmp_path / "alarms.json").sorted()] == ["survivor"]
