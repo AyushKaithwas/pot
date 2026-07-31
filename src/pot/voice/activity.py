@@ -45,6 +45,7 @@ ACTIVITY_LABELS = {
     "snooze": "snoozing",
     "current_time": "checking the time",
     "capabilities": "checking what I can do",
+    "stop_listening": "going quiet",
 }
 # Below this, a tool finished so fast that reporting its duration is noise.
 WORTH_TIMING_SECONDS = 1.0
