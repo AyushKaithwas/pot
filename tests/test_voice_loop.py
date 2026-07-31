@@ -18,7 +18,9 @@ from pot.voice.conversation import ConversationWindow
 from pot.voice.session import (
     RECONNECT_DELAY_CAP_SECONDS,
     RECONNECT_DELAY_SECONDS,
+    TranscriptPrinter,
     _finish_speaking,
+    _hold_for_question,
     _how_to_talk,
     _is_expected,
     _listen_while_ringing,
@@ -318,3 +320,48 @@ def test_reconnect_backs_off_while_the_network_is_down():
 def test_reconnect_is_prompt_again_once_a_connection_survives():
     """The hourly expiry is a healthy connection ending, so the next one starts in seconds."""
     assert _reconnect_delay(30.0, connection_lasted=3600.0) == RECONNECT_DELAY_SECONDS
+
+
+def test_a_reply_ending_in_a_question_keeps_pot_listening():
+    """ "Which light?" answered by silence-then-wake-word is a broken conversation."""
+    now = 0.0
+    window = ConversationWindow(5, 15, clock=lambda: now)
+    window.start()
+    transcripts = TranscriptPrinter()
+    transcripts.last_assistant_text = "Which light did you mean?"
+
+    _hold_for_question(transcripts, window)
+    now = 8.0
+    assert not window.expired(), "it asked, so it waits to be answered"
+
+
+def test_a_confirmation_gets_only_the_short_window():
+    now = 0.0
+    window = ConversationWindow(5, 15, clock=lambda: now)
+    window.start()
+    transcripts = TranscriptPrinter()
+    transcripts.last_assistant_text = "Done, the lights are off."
+
+    _hold_for_question(transcripts, window)
+    now = 6.0
+    assert window.expired(), "a confirmation rarely has a follow-up; the mic closes promptly"
+
+
+def test_the_users_own_question_does_not_hold_the_window():
+    """last_assistant_text tracks Pot's words only, so "what time is it?" from the user can't
+    trigger the grace meant for Pot's questions."""
+    transcripts = TranscriptPrinter()
+
+    class Item:
+        role = "user"
+        status = "done"
+        item_id = "u1"
+
+        class Part:
+            transcript = "What time is it?"
+            text = None
+
+        content = [Part()]
+
+    transcripts.feed([Item()])
+    assert transcripts.last_assistant_text == ""

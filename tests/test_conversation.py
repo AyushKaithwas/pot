@@ -77,3 +77,42 @@ def test_remaining_counts_down_and_floors_at_zero():
     assert conversation.remaining() == 6.0
     clock.advance(100)
     assert conversation.remaining() == 0.0
+
+
+def test_touch_never_pulls_the_deadline_earlier():
+    """A routine event after await_answer must not shrink the question grace, or it would last
+    exactly until the next heartbeat."""
+    now = 0.0
+    window = ConversationWindow(5, 15, clock=lambda: now)
+    window.start()
+    window.await_answer()
+
+    now = 1.0
+    window.touch()
+    now = 10.0
+    assert not window.expired(), "the 15s question grace outlives a touch at 1s"
+
+
+def test_a_question_holds_the_window_longer():
+    now = 0.0
+    window = ConversationWindow(5, 15, clock=lambda: now)
+    window.start()
+    window.await_answer()
+    now = 8.0
+    assert not window.expired(), "Pot asked; 8s of thinking time is not abandonment"
+    now = 16.0
+    assert window.expired()
+
+
+def test_await_answer_does_not_reopen_a_stopped_window():
+    """Music ending the exchange wins over a stray question mark in the same reply."""
+    window = ConversationWindow(5, 15)
+    window.start()
+    window.stop()
+    window.await_answer()
+    assert not window.open
+
+
+def test_the_question_grace_defaults_to_the_plain_length():
+    window = ConversationWindow(5)
+    assert window.question_seconds == 5

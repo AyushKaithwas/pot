@@ -153,7 +153,9 @@ async def run_voice(settings: Settings) -> None:
         mute=gate.mute_for,
     )
     wake = _build_wake_word(settings)
-    window = ConversationWindow(audio_config.wake.conversation_idle_seconds)
+    window = ConversationWindow(
+        audio_config.wake.conversation_idle_seconds, audio_config.wake.question_idle_seconds
+    )
     # The detector has to keep listening while Pot talks, or you could never interrupt it, so it
     # gets a copy of the mic with Pot's own voice subtracted out.
     echo = EchoSuppressor(audio_config.sample_rate, enabled=audio_config.echo_suppression)
@@ -497,8 +499,10 @@ async def _pump_events(
                 activity.finish(event.tool.name)
             elif event.type == "history_added":
                 transcripts.feed([event.item])
+                _hold_for_question(transcripts, window)
             elif event.type == "history_updated":
                 transcripts.feed(event.history)
+                _hold_for_question(transcripts, window)
             elif event.type == "raw_model_event" and event.data.type == "usage":
                 _record_usage(event.data, runtime)
             elif (
@@ -534,6 +538,19 @@ EXPECTED_ERRORS = ("conversation_already_has_active_response", "session_expired"
 
 def _is_expected(error: object) -> bool:
     return any(code in str(error) for code in EXPECTED_ERRORS)
+
+
+def _hold_for_question(transcripts: TranscriptPrinter, window: ConversationWindow | None) -> None:
+    """When Pot's reply ends in a question, keep listening long enough to be answered.
+
+    Everything else gets the short window: a confirmation rarely has a follow-up, and Alexa ships
+    the same default. The check is on the finalized transcript, which is the only place Pot's own
+    words are visible to us.
+    """
+    if window is None:
+        return
+    if transcripts.last_assistant_text.rstrip().endswith(("?", "？")):
+        window.await_answer()
 
 
 def _record_usage(event: object, runtime: Runtime) -> None:
@@ -676,6 +693,8 @@ class TranscriptPrinter:
 
     def __init__(self) -> None:
         self._printed: dict[str, str] = {}
+        # Pot's most recent finalized words, for whoever needs to know how the reply ended.
+        self.last_assistant_text = ""
 
     def feed(self, items: Iterable[object]) -> None:
         for item in items:
@@ -690,6 +709,8 @@ class TranscriptPrinter:
             for content in getattr(item, "content", []) or []
             if (part := getattr(content, "transcript", None) or getattr(content, "text", None))
         ).strip()
+        if role == "assistant" and text:
+            self.last_assistant_text = text
         item_id = getattr(item, "item_id", "")
         if not text or self._printed.get(item_id) == text:
             return

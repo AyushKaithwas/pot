@@ -102,9 +102,13 @@ class WakeConfig(BaseModel):
     # fraction late. Any longer and it replays the wake word itself, which then gets transcribed
     # as a turn of its own and answered ("Mycroft." -> "Your MacBook Pro is available").
     preroll_seconds: float = Field(default=0.2, ge=0.0, le=3.0)
-    # How long you can stay quiet before Pot stops listening and waits for the word again.
-    # Timed locally: the API rejects turn_detection.idle_timeout_ms.
-    conversation_idle_seconds: int = Field(default=15, ge=2, le=120)
+    # How long you can stay quiet before Pot stops listening and waits for the word again. Short
+    # on purpose: chained requests fit in one sentence, so most exchanges are over when the reply
+    # is, and an open mic streams the room to a paid API. Long enough for "actually, 7:30".
+    # (Alexa's follow-up mode is opt-in too.) Timed locally: the API rejects idle_timeout_ms.
+    conversation_idle_seconds: int = Field(default=5, ge=2, le=120)
+    # Used instead when Pot's reply ends in a question: it asked, so it should wait to be answered.
+    question_idle_seconds: int = Field(default=15, ge=2, le=120)
 
     @field_validator("models", mode="before")
     @classmethod

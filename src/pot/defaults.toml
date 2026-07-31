@@ -60,7 +60,8 @@ threshold = 0.5                 # lower catches more and misfires more; tune wit
 preroll_seconds = 0.2           # replayed on wake, in case detection lands a fraction late.
                                 # Raise it if the first word of a request gets clipped; much
                                 # higher and the wake word itself is sent and answered.
-conversation_idle_seconds = 15  # quiet for this long and Pot goes back to waiting for the word
+conversation_idle_seconds = 5   # quiet for this long and Pot goes back to waiting for the word
+question_idle_seconds = 15      # the longer grace when Pot itself just asked you something
 
 [service]
 # Empty means Pot talks to OpenAI directly with your own OPENAI_API_KEY. That is the default and
