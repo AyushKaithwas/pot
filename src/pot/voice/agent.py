@@ -35,7 +35,7 @@ def build_run_config(settings: Settings) -> RealtimeRunConfig:
     audio_input: RealtimeAudioInputConfig = {
         "format": "pcm16",
         "turn_detection": turn_detection,
-        "noise_reduction": {"type": "near_field"},
+        "noise_reduction": {"type": settings.audio.noise_reduction},
     }
     # Transcribing the user's own audio is a separate per-minute charge and buys only the
     # terminal transcript, so it's opt-in.

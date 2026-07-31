@@ -12,7 +12,7 @@ import inspect
 import numpy as np
 import pytest
 
-from pot.audio.capture import Microphone, MicrophoneGate
+from pot.audio.capture import MicBoost, Microphone, MicrophoneGate
 from pot.audio.playback import DUCKED_GAIN, Speaker, _mix
 
 
@@ -299,3 +299,51 @@ async def test_the_chime_is_not_ducked_with_the_music():
         await asyncio.sleep(0.3)
         heard = np.abs(np.frombuffer(speaker.drain_reference(), dtype=np.int16))
     assert heard.max() > 6000, f"peak {heard.max()}: the chime must ride at full level"
+
+
+def _tone(peak: int, samples: int = 480) -> bytes:
+    return (np.sin(np.linspace(0, 20 * np.pi, samples)) * peak).astype(np.int16).tobytes()
+
+
+def test_quiet_speech_is_lifted_for_the_model():
+    """A cardioid podcast mic at room distance lands around 5% peak, and its hardware gain tops
+    out at 0 dB. The wake word copes; open speech recognition starves."""
+    boost = MicBoost(cap=4.0)
+    out = b""
+    for _ in range(30):  # let the envelope and slew settle
+        out = boost.apply(_tone(1600))  # ~5% of full scale
+    lifted = np.abs(np.frombuffer(out, dtype=np.int16)).max() / 32768
+    assert lifted > 0.15, f"lifted only to {lifted:.1%}"
+
+
+def test_loud_speech_is_left_alone():
+    boost = MicBoost(cap=4.0)
+    out = b""
+    for _ in range(30):
+        out = boost.apply(_tone(16000))  # ~50%: already healthy
+    peak = np.abs(np.frombuffer(out, dtype=np.int16)).max()
+    assert peak <= 17000, "no gain was needed, so none is applied"
+
+
+def test_the_cap_holds_even_in_a_silent_room():
+    """Without the cap, near-silence would be amplified into hiss between words."""
+    boost = MicBoost(cap=4.0)
+    out = b""
+    for _ in range(50):
+        out = boost.apply(_tone(80))  # near-silence
+    peak = np.abs(np.frombuffer(out, dtype=np.int16)).max()
+    assert peak <= 80 * 4.0 + 2, f"peak {peak}: gain exceeded its cap"
+
+
+def test_a_cap_of_one_is_a_true_bypass():
+    boost = MicBoost(cap=1.0)
+    pcm = _tone(1600)
+    assert boost.apply(pcm) == pcm, "mic_boost = 1 must mean untouched bytes"
+
+
+def test_gain_moves_gradually_not_in_steps():
+    """A gain that jumps between 20ms chunks is audible as pumping."""
+    boost = MicBoost(cap=4.0)
+    boost.apply(_tone(16000))  # loud: gain settles near 1
+    first = np.abs(np.frombuffer(boost.apply(_tone(1600)), dtype=np.int16)).max()
+    assert first < 1600 * 2, "one quiet chunk must not slam the gain to maximum"

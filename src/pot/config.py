@@ -142,6 +142,14 @@ class AudioConfig(BaseModel):
     # this empties the buffer mid-word and is heard as a click. Measured on a Pi over Wi-Fi:
     # 7ms best, 147ms worst, which needs roughly 300.
     playback_buffer_ms: int = Field(default=120, ge=20, le=1000)
+    # What the API's input noise reduction assumes about the microphone. near_field is for
+    # headsets and treats anything that doesn't sound close as noise to strip, which on a device
+    # you talk to from across the room means stripping the user. far_field is what this is.
+    noise_reduction: Literal["near_field", "far_field"] = "far_field"
+    # Cap on the automatic gain applied to what's sent to the model. The wake word copes with a
+    # quiet mic; open speech recognition doesn't, and some mics (a cardioid podcast mic, say) have
+    # no analog boost left to give. 1 disables it.
+    mic_boost: float = Field(default=4.0, ge=1.0, le=16.0)
     input_device: str = ""
     output_device: str = ""
     wake: WakeConfig = Field(default_factory=WakeConfig)

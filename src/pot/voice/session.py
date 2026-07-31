@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterable
 from agents.realtime import RealtimeRunner, RealtimeSession
 from websockets.exceptions import ConnectionClosed
 
-from pot.audio.capture import BLOCK_MILLISECONDS, Microphone, MicrophoneGate
+from pot.audio.capture import BLOCK_MILLISECONDS, MicBoost, Microphone, MicrophoneGate
 from pot.audio.cues import Cues
 from pot.audio.echo import EchoSuppressor
 from pot.audio.playback import Speaker
@@ -140,6 +140,7 @@ async def run_voice(settings: Settings) -> None:
         device_name=audio_config.input_device,
         gate=gate,
     )
+    boost = MicBoost(cap=audio_config.mic_boost)
     speaker = Speaker(
         sample_rate=audio_config.sample_rate,
         device_name=audio_config.output_device,
@@ -200,6 +201,7 @@ async def run_voice(settings: Settings) -> None:
                         echo,
                         interactive,
                         backlog,
+                        boost,
                     )
                 except ConnectionClosed as exc:
                     log.info("connection closed: %s", exc)
@@ -241,6 +243,7 @@ async def _one_connection(
     echo: EchoSuppressor,
     interactive: bool,
     backlog: deque[str],
+    boost: MicBoost,
 ) -> bool:
     """Hold one model connection open. True if the user asked to quit, False if it just ended."""
     session = await runner.run(model_config=settings.realtime_config())
@@ -262,7 +265,9 @@ async def _one_connection(
             announcer(held)
         tasks = [
             asyncio.create_task(
-                _pump_microphone(session, microphone, gate, wake, runtime, cues, window, echo, speaker),
+                _pump_microphone(
+                    session, microphone, gate, wake, runtime, cues, window, echo, speaker, boost
+                ),
                 name="mic",
             ),
             asyncio.create_task(
@@ -374,6 +379,7 @@ async def _pump_microphone(
     window: ConversationWindow | None = None,
     echo: EchoSuppressor | None = None,
     speaker: Speaker | None = None,
+    boost: MicBoost | None = None,
 ) -> None:
     """Route every chunk: always to the wake word, to OpenAI only once it has fired.
 
@@ -396,7 +402,7 @@ async def _pump_microphone(
             echo.playback(speaker.drain_reference())
         if gate.is_open:
             if not gate.is_muted:
-                await session.send_audio(chunk)
+                await session.send_audio(boost.apply(chunk) if boost else chunk)
             continue
         if recent is None:
             continue
@@ -409,7 +415,7 @@ async def _pump_microphone(
             if window is not None:
                 window.start()
             for buffered in recent:
-                await session.send_audio(buffered)
+                await session.send_audio(boost.apply(buffered) if boost else buffered)
             recent.clear()
 
 

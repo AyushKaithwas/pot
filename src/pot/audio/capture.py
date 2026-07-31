@@ -15,6 +15,7 @@ import asyncio
 import logging
 import time
 
+import numpy as np
 import sounddevice as sd
 
 from pot.audio.devices import find_device, stream_rate
@@ -65,6 +66,35 @@ class MicrophoneGate:
         if value != self._open:
             self._open = value
             self.changed.set()
+
+
+class MicBoost:
+    """Automatic gain for the audio sent to the model, and only that.
+
+    The wake word detector is a one-phrase classifier and fires happily on a quiet mic; open
+    speech recognition starves on the same signal, and a mic whose hardware gain tops out at 0 dB
+    has nothing more to give. This tracks the recent peak and lifts it toward a healthy level,
+    capped so a silent room isn't amplified into hiss. The detector and echo paths see raw audio:
+    their thresholds were tuned on it.
+    """
+
+    def __init__(self, cap: float = 4.0, *, target: float = 0.25) -> None:
+        self.cap = cap
+        self._target = target
+        self._envelope = 0.0
+        self._gain = 1.0
+
+    def apply(self, pcm16: bytes) -> bytes:
+        if self.cap <= 1.0 or not pcm16:
+            return pcm16
+        samples = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32)
+        peak = float(np.abs(samples).max()) / 32768.0
+        # A slow-decaying envelope, so the gain rides the sentence rather than every syllable.
+        self._envelope = max(peak, self._envelope * 0.995)
+        wanted = min(self.cap, max(1.0, self._target / max(self._envelope, 0.01)))
+        # Slewed, not stepped: a gain that jumps between chunks is audible as pumping.
+        self._gain += (wanted - self._gain) * 0.2
+        return np.clip(samples * self._gain, -32768, 32767).astype(np.int16).tobytes()
 
 
 class Microphone:
