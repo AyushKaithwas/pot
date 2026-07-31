@@ -110,3 +110,22 @@ def test_no_resampler_when_already_at_the_detector_rate():
     wake.feed(silence(200, rate=DETECTOR_RATE))
     total = sum(frame.shape[0] for frame in wake.frames)
     assert abs(total - DETECTOR_RATE * 0.2) < FRAME_SAMPLES
+
+
+async def test_reset_forgets_the_resamplers_tail_too():
+    """ "Forget everything heard so far" leaked the end of the previous conversation.
+
+    The streaming resampler holds a few tens of milliseconds in hand, so after a reset the first
+    "silent" frame carried the tail of whatever was said before, at full level.
+    """
+    wake = RecordingWake()
+    loud = (np.ones(int(SESSION_RATE * 0.3), dtype=np.int16) * 10_000).tobytes()
+    wake.feed(loud)
+    wake.reset()
+
+    heard_before_reset = len(wake.frames)
+    wake.feed(silence(300))
+    fresh = wake.frames[heard_before_reset:]
+    assert fresh, "the silence must produce frames at all"
+    peak = max(int(np.abs(frame).max()) for frame in fresh)
+    assert peak < 50, f"peak {peak}: the previous conversation leaked through the reset"

@@ -16,12 +16,28 @@ from pot.audio.capture import Microphone, MicrophoneGate
 from pot.audio.playback import DUCKED_GAIN, Speaker, _mix
 
 
+def _hardware_available() -> bool:
+    import sounddevice as sd
+
+    try:
+        sd.query_devices(None, "output")
+        return True
+    except Exception:
+        return False
+
+
+# Constructing a Speaker or Microphone queries a real PortAudio device, so these are hardware
+# integration tests: on a headless CI box they can only fail, which teaches people to ignore red.
+needs_hardware = pytest.mark.skipif(not _hardware_available(), reason="no audio device here")
+
+
 @pytest.mark.parametrize("cls", [Speaker, Microphone])
 def test_audio_objects_are_async_context_managers(cls):
     assert inspect.iscoroutinefunction(cls.__aenter__)
     assert inspect.iscoroutinefunction(cls.__aexit__)
 
 
+@needs_hardware
 async def test_speaker_plays_and_flushes():
     speaker = Speaker(sample_rate=24000)
     async with speaker:
@@ -44,6 +60,7 @@ def test_gate_can_start_open_for_always_on():
     assert MicrophoneGate(open_at_start=True).is_open
 
 
+@needs_hardware
 async def test_playback_waits_for_a_little_audio_before_starting():
     """Playing the first burst instantly is what leaves the device starved on the second one."""
     speaker = Speaker(sample_rate=24000, prebuffer_ms=100)
@@ -56,6 +73,7 @@ async def test_playback_waits_for_a_little_audio_before_starting():
         assert speaker.underruns == 0, "a short write must not be reported as starvation"
 
 
+@needs_hardware
 async def test_a_full_buffer_plays_without_underruns():
     speaker = Speaker(sample_rate=24000, prebuffer_ms=60)
     async with speaker:
@@ -64,6 +82,7 @@ async def test_a_full_buffer_plays_without_underruns():
     assert speaker.underruns == 0
 
 
+@needs_hardware
 def test_flush_disarms_playback_so_the_next_burst_rebuffers():
     speaker = Speaker(sample_rate=24000, prebuffer_ms=60)
     speaker.write(b"\x00\x00" * 2400)
@@ -71,6 +90,7 @@ def test_flush_disarms_playback_so_the_next_burst_rebuffers():
     assert not speaker.is_playing
 
 
+@needs_hardware
 async def test_the_end_of_a_reply_is_not_reported_as_starvation():
     """The count is a diagnostic the user is told to act on, so it has to mean something."""
     speaker = Speaker(sample_rate=24000, prebuffer_ms=60)
@@ -112,6 +132,7 @@ def _loud(samples: int, value: int = 8000) -> bytes:
     return np.full(samples, value, dtype=np.int16).tobytes()
 
 
+@needs_hardware
 async def test_music_plays_under_pots_voice_rather_than_after_it():
     """Queueing music behind speech would delay every reply by the length of the track."""
     speaker = Speaker(sample_rate=24000, prebuffer_ms=0)
@@ -153,6 +174,7 @@ def test_mixing_clips_rather_than_wrapping():
     assert loudest.max() == 32767
 
 
+@needs_hardware
 async def test_music_is_not_mistaken_for_pot_still_talking():
     """is_playing gates cues and the reopening of the mic, so music must not hold either open."""
     speaker = Speaker(sample_rate=24000, prebuffer_ms=0)
@@ -161,6 +183,7 @@ async def test_music_is_not_mistaken_for_pot_still_talking():
         assert not speaker.is_playing
 
 
+@needs_hardware
 def test_an_interruption_stops_pot_but_not_the_music():
     """Barge-in silences Pot, not the room: talking over a reply shouldn't kill the track."""
     speaker = Speaker(sample_rate=24000, prebuffer_ms=600)
@@ -172,6 +195,7 @@ def test_an_interruption_stops_pot_but_not_the_music():
     assert speaker.music_queued > 0
 
 
+@needs_hardware
 def test_stopping_music_leaves_pot_able_to_speak():
     speaker = Speaker(sample_rate=24000, prebuffer_ms=0)
     speaker.write(_loud(4800))
@@ -182,6 +206,7 @@ def test_stopping_music_leaves_pot_able_to_speak():
     assert speaker.is_playing
 
 
+@needs_hardware
 async def test_a_music_backlog_is_dropped_rather_than_allowed_to_drift():
     speaker = Speaker(sample_rate=24000, prebuffer_ms=0)
     async with speaker:
@@ -190,6 +215,7 @@ async def test_a_music_backlog_is_dropped_rather_than_allowed_to_drift():
         assert speaker.music_dropped > 0, "otherwise playback falls further behind the stream"
 
 
+@needs_hardware
 async def test_music_is_kept_out_of_the_echo_reference():
     """Suppression subtracts per band, and against continuous music that removes the speaker too.
 
@@ -204,6 +230,7 @@ async def test_music_is_kept_out_of_the_echo_reference():
         assert np.abs(np.frombuffer(speaker.drain_reference(), dtype=np.int16)).max() < 10
 
 
+@needs_hardware
 async def test_pots_own_voice_is_still_in_the_reference():
     speaker = Speaker(sample_rate=24000, prebuffer_ms=0)
     async with speaker:
@@ -212,6 +239,7 @@ async def test_pots_own_voice_is_still_in_the_reference():
         assert np.abs(np.frombuffer(speaker.drain_reference(), dtype=np.int16)).max() > 0
 
 
+@needs_hardware
 async def test_a_short_complete_sound_plays_even_behind_a_big_buffer():
     """The bug this catches: raising the buffer to 300ms silenced every earcon.
 
@@ -228,6 +256,7 @@ async def test_a_short_complete_sound_plays_even_behind_a_big_buffer():
     assert played > 1000, f"peak {played}: the cue never reached the speaker"
 
 
+@needs_hardware
 async def test_a_partial_stream_still_waits_for_the_buffer():
     """Streaming audio must still pre-buffer, or the jitter fix is undone."""
     speaker = Speaker(sample_rate=24000, prebuffer_ms=300)
@@ -238,6 +267,7 @@ async def test_a_partial_stream_still_waits_for_the_buffer():
         assert np.abs(np.frombuffer(speaker.drain_reference(), dtype=np.int16)).max() < 10
 
 
+@needs_hardware
 async def test_a_chime_rings_over_speech_instead_of_waiting_for_it():
     """An alarm that queues behind a sentence isn't ringing at the time it was set for."""
     speaker = Speaker(sample_rate=24000, prebuffer_ms=0)
@@ -250,6 +280,7 @@ async def test_a_chime_rings_over_speech_instead_of_waiting_for_it():
     assert heard.max() > 6000, "the chime has to be audible immediately, not after the sentence"
 
 
+@needs_hardware
 async def test_stopping_the_chime_leaves_speech_playing():
     speaker = Speaker(sample_rate=24000, prebuffer_ms=0)
     speaker.write(_loud(4800))
@@ -258,6 +289,7 @@ async def test_stopping_the_chime_leaves_speech_playing():
     assert speaker.is_playing, "dismissing an alarm must not silence what Pot was saying"
 
 
+@needs_hardware
 async def test_the_chime_is_not_ducked_with_the_music():
     """DUCKED_GAIN applies while anything rings; ducking the ring itself would defeat it."""
     speaker = Speaker(sample_rate=24000, prebuffer_ms=0)

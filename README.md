@@ -34,7 +34,7 @@ nobody's house.
 | `~/.config/pot/pot.toml` | your settings, merged over the shipped defaults |
 | `~/.config/pot/env` | secrets |
 | `~/.local/state/pot/` | device keys, Spotify token, alarms, wake word cache |
-| `config/pot.toml` | shipped defaults, and the reference for every option |
+| `pot config defaults` | prints the shipped defaults, the reference for every option |
 
 `pot config path` prints all of it, `pot config show` prints the merged result.
 
@@ -429,7 +429,7 @@ with the session. See `src/pot/skills/lights/service.py`.
 | `src/pot/scheduler.py` | deferred actions: timers, "in ten minutes" |
 | `src/pot/audio/wake.py` | local wake word: framing, resampling, debounce |
 | `src/pot/service.py` | the systemd user unit |
-| `config/pot.toml` | shipped defaults: every option with a comment |
+| `src/pot/defaults.toml` | shipped defaults: every option with a comment |
 
 ## Development
 

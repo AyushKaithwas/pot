@@ -14,6 +14,7 @@ import json
 import os
 import tomllib
 from functools import lru_cache
+from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,8 +24,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pot.usage import Rates
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# Shipped defaults. Editing this file is fine for development; an install shouldn't have to.
-DEFAULTS_FILE = REPO_ROOT / "config" / "pot.toml"
+# Shipped defaults. Inside the package, because a wheel install only carries the package: kept at
+# the repo root, `pip install pot` would silently lose the cost table and every documented option.
+DEFAULTS_FILE = Path(str(resources.files("pot").joinpath("defaults.toml")))
 
 
 def _xdg(variable: str, fallback: str) -> Path:

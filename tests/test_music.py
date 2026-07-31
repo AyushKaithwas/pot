@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -587,3 +588,38 @@ async def test_saving_something_already_saved_says_so_instead(tmp_path):
     spoken = await provider.save_current()
     assert "already" in spoken
     assert not any(r.method == "PUT" and r.url.path.endswith("/me/tracks") for r in calls)
+
+
+class VolumeRaceProvider:
+    """Records every volume call, slowly, so interleavings are observable."""
+
+    name = "race"
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    async def volume(self) -> int:
+        await asyncio.sleep(0.02)
+        return 70
+
+    async def set_volume(self, percent: int) -> None:
+        await asyncio.sleep(0.02)
+        self.calls.append(percent)
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_a_manual_volume_change_cannot_be_undone_by_ducking():
+    """duck -> manual change -> unduck used to restore the pre-duck volume over the user's choice.
+
+    With the lock, the manual change waits out the duck, lands after it, and clears the restore
+    point, so the unduck has nothing to "put back".
+    """
+    provider = VolumeRaceProvider()
+    service = MusicService(Settings(music=MusicConfig(duck_to_percent=20)), provider)
+
+    await asyncio.gather(service.duck(), service.set_volume(35))
+    await service.unduck()
+
+    assert provider.calls == [20, 35], f"got {provider.calls}: the user's 35 must be what remains"

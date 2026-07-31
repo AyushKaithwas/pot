@@ -231,7 +231,7 @@ def lights_set(
 
 
 @lights_app.command("scene")
-def lights_scene(name: str = typer.Argument(..., help="Scene name from config/pot.toml")) -> None:
+def lights_scene(name: str = typer.Argument(..., help="Scene name from your pot.toml")) -> None:
     """Apply a configured scene."""
     runtime = _setup()
 
@@ -426,6 +426,14 @@ def config_edit() -> None:
         config_init()
     editor = os.environ.get("EDITOR", "nano" if sys.platform.startswith("linux") else "open -e")
     subprocess.run([*editor.split(), str(target)], check=False)
+
+
+@config_app.command("defaults")
+def config_defaults() -> None:
+    """Print the shipped defaults: every option, with the comment explaining it."""
+    from pot.config import DEFAULTS_FILE
+
+    console.print(DEFAULTS_FILE.read_text(), highlight=False)
 
 
 @config_app.command("show")
@@ -680,17 +688,12 @@ def audio_benchmark(
     from pot.audio.wake import available, download, is_downloaded, stock_models
 
     settings = _setup().settings
-    engine = settings.audio.wake.engine
-    if not available(engine):
-        extra = "porcupine" if engine == "porcupine" else "wakeword"
-        console.print(f"[red]{engine} not installed: uv sync --extra {extra}[/red]")
+    if not available():
+        console.print("[red]openWakeWord not installed: uv sync --extra wakeword[/red]")
         raise typer.Exit(1)
 
     # The phrase triggers, not the timer/weather classifiers openWakeWord also ships.
-    candidates = [name for name in stock_models(engine) if name not in {"timer", "weather"}]
-    if engine == "porcupine":
-        # Porcupine ships ~20 keywords; testing them all would take ten minutes of talking.
-        candidates = [name for name in candidates if name in {"computer", "jarvis", "bumblebee", "picovoice"}]
+    candidates = [name for name in stock_models() if name not in {"timer", "weather"}]
 
     async def run() -> None:
         missing = [name for name in candidates if not is_downloaded(name)]
@@ -947,7 +950,7 @@ def _spotify(runtime: Runtime):
             "[red]no Spotify client id configured.[/red]\n"
             "  1. Create an app at https://developer.spotify.com/dashboard\n"
             f"  2. Add the redirect URI {provider.auth.redirect_uri}\n"
-            r"  3. Put the client id under \[music.spotify] in config/pot.toml"
+            r"  3. Put the client id under \[music.spotify] in ~/.config/pot/pot.toml"
         )
         return None
     return provider

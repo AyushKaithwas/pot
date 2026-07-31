@@ -94,9 +94,12 @@ class MusicService:
 
     async def set_volume(self, percent: int) -> str:
         percent = max(0, min(100, percent))
-        await self.provider.set_volume(percent)
-        # A manual volume change during ducking is the user's intent, not ours to undo.
-        self._ducked_from = None
+        # Under the duck lock: interleaved with duck()/unduck(), a manual change could be applied
+        # mid-duck and then "restored" away by the unduck that follows.
+        async with self._duck_lock:
+            await self.provider.set_volume(percent)
+            # A manual volume change during ducking is the user's intent, not ours to undo.
+            self._ducked_from = None
         return f"volume {percent}%"
 
     async def duck(self) -> None:

@@ -126,8 +126,12 @@ class ManagedSpeaker:
                 log.warning("could not start %s: %s", self._config.binary, exc)
                 return
             log.info("Pot's Spotify speaker %r is up", self._config.name)
+            # stderr must be drained or librespot eventually blocks writing to a full pipe and
+            # the music just stops; its complaints are also the only diagnostics it has.
+            chatter = asyncio.create_task(self._log_stderr(self._process.stderr), name="librespot-log")
             if self._process.stdout is not None:
                 await self._play_from(self._process.stdout)
+            await asyncio.gather(chatter, return_exceptions=True)
             code = await self._process.wait()
             self._silence()
             if code == 0:
@@ -154,6 +158,12 @@ class ManagedSpeaker:
             resampled = resampler.feed(mono)
             if resampled:
                 self._speaker.write_music(resampled)
+
+    async def _log_stderr(self, stream: asyncio.StreamReader | None) -> None:
+        if stream is None:
+            return
+        async for raw in stream:
+            log.debug("librespot: %s", raw.decode(errors="replace").rstrip())
 
     def _silence(self) -> None:
         """Drop whatever is still queued, so a restart doesn't replay the last second."""

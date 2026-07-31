@@ -59,13 +59,15 @@ class WakeWord:
         self.threshold = threshold
         self.last_score = 0.0
         self.last_model = ""
-        self._resampler = (
-            soxr.ResampleStream(sample_rate, DETECTOR_RATE, 1, dtype="int16")
-            if sample_rate != DETECTOR_RATE
-            else None
-        )
+        self._sample_rate = sample_rate
+        self._resampler = self._new_resampler()
         self._buffer = bytearray()
         self._muted_until = 0.0
+
+    def _new_resampler(self) -> soxr.ResampleStream | None:
+        if self._sample_rate == DETECTOR_RATE:
+            return None
+        return soxr.ResampleStream(self._sample_rate, DETECTOR_RATE, 1, dtype="int16")
 
     @property
     def model_names(self) -> list[str]:
@@ -100,6 +102,9 @@ class WakeWord:
         wake word unavailable for two seconds after a conversation ends.
         """
         self._buffer.clear()
+        # The resampler holds a tail of whatever was last heard, and "forget everything" that
+        # leaks the end of the previous conversation into the next listen isn't forgetting.
+        self._resampler = self._new_resampler()
         self.last_score = 0.0
         self._muted_until = 0.0
         self.engine.reset()
