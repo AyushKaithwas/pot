@@ -2,7 +2,24 @@
 name = "pot"
 version = "0.1.0"
 description = "A voice assistant that chains commands, controls Tuya lights, and grows one skill file at a time"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ayush Kaithwas" }]
 requires-python = ">=3.11"
+keywords = ["voice-assistant", "openai-realtime", "raspberry-pi", "wake-word", "tuya", "spotify"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
 dependencies = [
     "openai-agents>=0.18.3",
     "openai>=2.48.0",
@@ -31,6 +48,11 @@ wakeword = [
 
 [project.scripts]
 pot = "pot.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/AyushKaithwas/pot"
+Source = "https://github.com/AyushKaithwas/pot"
+Issues = "https://github.com/AyushKaithwas/pot/issues"
 
 [tool.uv]
 # openWakeWord asks for tflite-runtime on Linux, which is deprecated, stops at cp311 and has

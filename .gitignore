@@ -3,9 +3,26 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
-.env
-config/devices.json
-tinytuya.json
-snapshot.json
+dist/
+build/
+*.egg-info/
 *.log
 .DS_Store
+
+# Secrets. Real ones belong in ~/.config/pot/env; these catch a copy made beside the source.
+.env
+.env.*
+!.env.example
+
+# Per-install state: device local keys, tokens, tinytuya's scan output. Pot keeps these under
+# ~/.local/state/pot, but tinytuya's own wizard writes into whatever directory it's run from.
+config/devices.json
+devices.json
+tinytuya.json
+snapshot.json
+tuya-raw.json
+spotify-token.json
+
+# Wake word models trained on your own voice.
+*.onnx
+*.tflite
