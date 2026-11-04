@@ -152,12 +152,24 @@ def _spoken_repeat(repeat: Repeat) -> str:
     }.get(repeat, "once")
 
 
+def _stamp(path: Path) -> tuple[int, int, int]:
+    """What changes when anyone writes the store: inode, mtime and size.
+
+    mtime alone isn't enough. Linux stamps files from a clock that ticks every few milliseconds,
+    so a CLI cancellation landing in the same tick as the daemon's last save leaves the mtime
+    unchanged and the daemon firing what was cancelled. Every save renames a fresh file into
+    place, so the inode changes even when the clock doesn't.
+    """
+    info = path.stat()
+    return (info.st_ino, info.st_mtime_ns, info.st_size)
+
+
 @dataclass
 class AlarmStore:
     """The set of pending timers and alarms, saved after every change.
 
     Two processes can hold this file at once: the running assistant, and `pot alarms cancel` from
-    a shell. Reads check the file's mtime and reload when someone else wrote it, so a CLI
+    a shell. Reads check the file's identity and reload when someone else wrote it, so a CLI
     cancellation reaches the daemon within a tick instead of being resurrected by its stale
     memory. Writes are last-writer-wins, which for a device with one household is livable; real
     concurrent writing would need a lock file.
@@ -165,18 +177,18 @@ class AlarmStore:
 
     path: Path
     alarms: dict[str, Alarm] = field(default_factory=dict)
-    _mtime: int | None = field(default=None, repr=False)
+    _stamp: tuple[int, int, int] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.load()
 
     def load(self) -> None:
         if not self.path.exists():
-            self._mtime = None
+            self._stamp = None
             return
         try:
             raw = json.loads(self.path.read_text())
-            self._mtime = self.path.stat().st_mtime_ns
+            self._stamp = _stamp(self.path)
         except (json.JSONDecodeError, OSError):
             log.warning("could not read alarms at %s; starting empty", self.path)
             return
@@ -191,15 +203,15 @@ class AlarmStore:
     def _refresh(self) -> None:
         """Pick up changes another process made to the file."""
         try:
-            mtime = self.path.stat().st_mtime_ns
+            stamp = _stamp(self.path)
         except FileNotFoundError:
             if self.alarms:
                 # Someone cleared the file out from under us; firing from memory would resurrect
                 # alarms the user just cancelled.
                 self.alarms.clear()
-            self._mtime = None
+            self._stamp = None
             return
-        if mtime != self._mtime:
+        if stamp != self._stamp:
             self.alarms.clear()
             self.load()
 
@@ -222,7 +234,7 @@ class AlarmStore:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(scratch, self.path)
-        self._mtime = self.path.stat().st_mtime_ns
+        self._stamp = _stamp(self.path)
 
     def sorted(self) -> list[Alarm]:
         self._refresh()
