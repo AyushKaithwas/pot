@@ -1,5 +1,9 @@
 # Pot
 
+[![tests](https://github.com/AyushKaithwas/pot/actions/workflows/tests.yml/badge.svg)](https://github.com/AyushKaithwas/pot/actions/workflows/tests.yml)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 A voice assistant that takes a whole sentence at a time. Speech-to-speech on OpenAI's realtime
 models, so "turn the tube light on at 30% warm, kill it in ten minutes, and tell me if it'll
 rain tomorrow" is one turn, not four commands.
@@ -11,18 +15,81 @@ idle room costs nothing.
 MIT licensed. Skills are one file each, and the ones that exist (lights, music, alarms, research)
 are as much examples as features.
 
-## Setup
+## What one sentence turns into
 
-```bash
-brew install uv portaudio          # macOS
-uv sync
-uv run pot config init             # writes ~/.config/pot/pot.toml
-uv run pot doctor
+> "Turn the tube light on at 30% warm, kill it in ten minutes, and tell me if it'll rain
+> tomorrow."
+
+The realtime model hears that once and answers it with three tool calls in the same turn:
+
+| tool | what happens |
+|---|---|
+| `set_lights` | switched on over the LAN, 30% brightness, warm white |
+| `set_lights` with `after_seconds=600` | parked as a silent timer in the alarm store, so it survives a restart and cancels by voice |
+| `research` | a web-search model looks it up; Pot keeps listening while it does |
+
+Some other things it takes in one go:
+
+```
+"wake me at 6:30 every weekday"                 rings, gets louder, ducks the music
+"play moondance, the album, on the kitchen speaker"
+"save this and add it to my running playlist"   two music tools, one turn
+"what's the time, and dim everything to 10%"
+"that's all"                                    closes the mic now instead of waiting out the quiet
 ```
 
-Put `OPENAI_API_KEY` in `~/.config/pot/env` (or a `.env` beside the source while developing).
-`doctor` reports what's missing: keys, audio devices, the wake word model, and whether each
-configured light is answering on the network.
+## How it fits together
+
+```
+ mic ─► wake word ─► mic gate ─► realtime session ◄──► skills, as tool calls
+        on device    opens when   (OpenAI, speech       lights    Tuya on the LAN, cloud fallback
+                     it fires      in and out)          music     Spotify Web API, librespot
+                                       │                time      timers and alarms, kept on disk
+                                       │ Pot's voice    research  web search on a text model
+                                       ▼                basics    clock, "that's all"
+ speaker ◄────────────────────────── mixer ◄── earcons, alarm ring, librespot music
+                                       │
+                                       └──► echo reference, subtracted from what the wake word hears
+```
+
+Each skill is a module under `src/pot/skills/` that exports a `SKILL`; the registry finds it, puts
+its tools in the session and appends its prompt to the persona. The connection is the only thing
+that restarts: the API ends sessions after an hour, and Pot reconnects in a couple of seconds with
+devices, skills and pending alarms intact.
+
+## Contents
+
+- [Quickstart](#quickstart)
+- [Controlling the lights](#controlling-the-lights)
+- [Music](#music)
+- [Talking to it](#talking-to-it)
+- [On a Raspberry Pi](#on-a-raspberry-pi)
+- [Wake word](#wake-word)
+- [Timers and alarms](#timers-and-alarms)
+- [Echo: the mic hearing the speaker](#echo-the-mic-hearing-the-speaker)
+- [As an audio-only device](#as-an-audio-only-device)
+- [What it costs](#what-it-costs)
+- [Adding a skill](#adding-a-skill)
+- [Layout](#layout) · [Development](#development) · [Not built yet](#not-built-yet)
+
+## Quickstart
+
+You need an OpenAI API key, Python 3.11+ and PortAudio. Lights, music and the wake word are all
+optional and set up separately below.
+
+```bash
+git clone https://github.com/AyushKaithwas/pot && cd pot
+brew install uv portaudio          # macOS; on Debian or a Pi: sudo apt install libportaudio2
+uv sync
+uv run pot config init             # writes ~/.config/pot/pot.toml
+echo 'OPENAI_API_KEY=sk-...' >> ~/.config/pot/env
+uv run pot doctor
+uv run pot talk                    # press space, then talk
+```
+
+Secrets go in `~/.config/pot/env` (or a `.env` beside the source while developing; see
+[.env.example](.env.example)). `doctor` reports what's missing: keys, audio devices, the wake
+word model, and whether each configured light is answering on the network.
 
 ### Where things live
 
@@ -120,9 +187,11 @@ On a Pi there's nothing else to play through, so Pot runs its own client:
 sudo apt install librespot     # brew install librespot on macOS
 ```
 
-Then set `enabled = true` under `[music.speaker]` (and `backend = "alsa"` on the Pi). Pot starts
-librespot with the session, restarts it if it dies, and prefers it over other devices. "Pot"
-appears in your Spotify app's device list like any other speaker.
+Then set `enabled = true` under `[music.speaker]`. Pot starts librespot with the session, restarts
+it if it dies, and prefers it over other devices. "Pot" appears in your Spotify app's device list
+like any other speaker. Its audio comes back through a pipe and plays through Pot's own mixer
+rather than going to the sound card directly, which is the same on a Mac and a Pi, so there's no
+audio backend to pick.
 
 librespot is an unofficial Spotify client. Fine for your own home, not something to ship in a
 product, which is why it's optional and off by default.
@@ -163,7 +232,7 @@ A Pi with a USB mic and a powered speaker is the target: no screen, no keyboard,
 ```bash
 sudo apt update && sudo apt install -y libportaudio2 git
 curl -LsSf https://astral.sh/uv/install.sh | sh
-git clone <this repo> ~/pot && cd ~/pot
+git clone https://github.com/AyushKaithwas/pot ~/pot && cd ~/pot
 uv venv --python 3.12          # not 3.13: onnxruntime's aarch64 wheels lag
 uv sync --extra wakeword
 ```
@@ -201,8 +270,9 @@ mode = "wake_word"
 [audio.wake]
 models = ["hey_mycroft"]   # any of them firing wakes Pot
 threshold = 0.5
-preroll_seconds = 1.0
-conversation_idle_seconds = 15
+preroll_seconds = 0.2
+conversation_idle_seconds = 5   # quiet this long and it waits for the word again
+question_idle_seconds = 15      # used instead when Pot's reply ended in a question
 ```
 
 Detection runs entirely on the machine. The stock models are fetched once (~1 MB each) and after
@@ -238,13 +308,17 @@ remains, so another engine is one class implementing `scores`.
 
 The microphone runs constantly but **audio only reaches OpenAI after the word fires**, so an empty
 room costs nothing. After that the mic stays open for follow-ups until the conversation goes quiet
-for `conversation_idle_seconds`, then it closes and waits for the word again.
+for `conversation_idle_seconds`, then it closes and waits for the word again. Five seconds is short
+on purpose: a chained request fits in one sentence, so most exchanges are over when the reply is,
+and an open mic streams the room to a paid API. If Pot's reply ends in a question it waits
+`question_idle_seconds` instead, and "that's all" closes it straight away.
 
 Two details that took measuring:
 
-- **Pre-roll.** Detection completes a few hundred milliseconds after the word ends, by which point
-  you're already talking. Pot replays the last second of audio so the start of the request isn't
-  clipped, which is what real assistants do.
+- **Pre-roll.** Pot replays a little audio from before detection so the start of the request
+  isn't clipped. Only a little: detection completes as the word ends, so the pre-roll just covers
+  the detector being a fraction late. Much more and it replays the wake word itself, which is then
+  transcribed and answered as a turn of its own ("Mycroft." -> "Your MacBook Pro is available").
 - **The conversation timeout is local.** The Realtime API appears to offer
   `turn_detection.idle_timeout_ms`, and the SDK's types advertise it, but the server rejects it as
   an unknown parameter, which silently discards the whole session config and leaves the model with
@@ -315,9 +389,10 @@ best first:
    ```
    This is webrtc's AEC3 and is far better than what Pot does in-process. `pot audio devices` will
    show the new source once it exists.
-3. **Route music through Pot** so it becomes part of the reference: run librespot with its pipe
-   backend and let Pot mix and play it. Designed but not built; it would make music cancellable
-   without depending on PipeWire, at the cost of pushing all audio through Python.
+3. **Let Pot be the speaker** (`[music.speaker]`, above). librespot's audio is mixed through Pot,
+   so it is in the reference the suppressor subtracts. That routing is what any in-process
+   cancellation needs first, but the suppressor is built for speech and is the wrong tool for
+   continuous music, so expect it to help rather than solve this.
 
 ## As an audio-only device
 
@@ -347,8 +422,6 @@ One thing still assumes a laptop, with a workaround:
   ssh -L 8765:127.0.0.1:8765 pi@pot
   uv run pot music login --no-browser
   ```
-Still to build: a custom "hey pot" model, echo cancellation for wake-word-while-music, and a setup
-wizard so provider credentials don't need an SSH session.
 
 ## What it costs
 
@@ -420,27 +493,35 @@ with the session. See `src/pot/skills/lights/service.py`.
 
 | Path | What |
 |---|---|
-| `src/pot/cli.py` | `talk`, `doctor`, `skills`, `lights …` |
-| `src/pot/voice/` | persona, agent assembly, the realtime event loop |
-| `src/pot/audio/` | mic capture, playback with flush-on-interrupt, push-to-talk keys |
+| `src/pot/cli.py` | `talk`, `doctor`, `skills`, `costs`, and the `lights`, `music`, `audio`, `alarms`, `config`, `service` groups |
+| `src/pot/voice/` | persona, agent assembly, the realtime event loop and reconnects |
+| `src/pot/audio/` | mic capture, the playback mixer, earcons, echo suppression, push-to-talk keys |
+| `src/pot/audio/wake/` | local wake word: framing, resampling, debounce, the engine seam |
 | `src/pot/skills/` | one module per capability, each exporting `SKILL` |
 | `src/pot/skills/lights/` | discovery, provider chain (LAN → cloud), alias resolution |
-| `src/pot/skills/music/` | Spotify auth, Web API client, speaker choice, ducking |
-| `src/pot/scheduler.py` | deferred actions: timers, "in ten minutes" |
-| `src/pot/audio/wake.py` | local wake word: framing, resampling, debounce |
+| `src/pot/skills/music/` | Spotify auth, Web API client, speaker choice, librespot, ducking |
+| `src/pot/skills/time/` | timers, alarms and reminders: ringing, snooze, delayed light changes |
+| `src/pot/alarms.py` | the alarm store on disk: atomic writes, recurrence by wall-clock time |
 | `src/pot/service.py` | the systemd user unit |
 | `src/pot/defaults.toml` | shipped defaults: every option with a comment |
 
 ## Development
 
 ```bash
+uv sync --extra wakeword   # without it the wake word tests skip
 uv run pytest
 uv run ruff check . && uv run ruff format .
 ```
 
-## Later
+Tests need no API keys and no audio hardware: config, secrets and state are pointed at a throwaway
+directory before anything reads them, and the tests that open a real audio stream skip on a
+machine without a sound card. The wake word tests fetch the stock `hey_mycroft` model once if it
+isn't there yet. CI runs the same thing on every push.
 
-- **Wake word**: `openWakeWord` in front of the capture stream, opening the same mic gate that
-  the spacebar opens today.
-- **Raspberry Pi 4**: set `[audio] input_device` / `output_device` to the USB mic and speaker,
-  run it under systemd. Echo cancellation matters once mic and speaker share a room.
+## Not built yet
+
+- **A trained "hey pot".** The stock triggers work; [docs/custom-wake-word.md](docs/custom-wake-word.md)
+  covers training your own.
+- **Hearing the wake word over loud music** on a shared speaker. See [Echo](#echo-the-mic-hearing-the-speaker)
+  for what works today.
+- **A setup wizard**, so provider credentials don't need an SSH session.
