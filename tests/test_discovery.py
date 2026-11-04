@@ -16,8 +16,8 @@ from pot.skills.lights import discovery
 
 BROADCAST = {
     "ip": "192.0.2.27",
-    "gwId": "bf00000000000000beta1",
-    "productKey": "keyexampleproduct",
+    "gwId": "test0000000000000beta1",
+    "productKey": "keyexample000000",
     "version": "3.5",
 }
 

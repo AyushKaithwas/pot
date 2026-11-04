@@ -22,7 +22,7 @@ from pot.runtime import Runtime, set_runtime  # noqa: E402
 def beta1() -> LightDevice:
     return LightDevice(
         id="beta1",
-        gwid="bf00000000000000beta1",
+        gwid="test0000000000000beta1",
         name="Beta 1",
         room="bedroom",
         kind="batten",
@@ -34,7 +34,7 @@ def beta1() -> LightDevice:
 
 @pytest.fixture
 def beta2() -> LightDevice:
-    return LightDevice(id="beta2", gwid="bf00000000000000beta2", name="Beta 2", kind="batten")
+    return LightDevice(id="beta2", gwid="test0000000000000beta2", name="Beta 2", kind="batten")
 
 
 @pytest.fixture
