@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what the Pi runs; 3.11 is the floor in pyproject.
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # sounddevice loads PortAudio at import. There's no sound card on a runner, so the tests
+      # that open a real stream skip themselves; the library still has to be there to import.
+      - name: Install PortAudio
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libportaudio2
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: uv sync --locked --extra wakeword
+
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+
+      - name: Test
+        run: uv run pytest -q -rs
